@@ -171,27 +171,109 @@ setInterval(poll,2000);  // Poll every 2 seconds for faster updates
 });
 
 app.get("/control",async(req,res)=>{
-  const qr=await QRCode.toDataURL(`${PUBLIC_HOST}/join`);
-  const rows=Object.entries(SLOTS).map(([n,s])=>`<tr>
-  <td>${n}</td><td>${s?s.label:"-"}</td><td>${s?s.streamId:"-"}</td>
-  <td><a href="/slot/${n}" target="_blank">Open</a></td>
-  <td><button onclick="clearSlot(${n})">Clear</button></td></tr>`).join("");
+  const qr=await QRCode.toDataURL(`${PUBLIC_HOST}/join`,{color:{dark:"#667eea",light:"#ffffff"}});
+  const rows=Object.entries(SLOTS).map(([n,s])=>{
+    const status=s?'<span class="badge active">Active</span>':'<span class="badge empty">Empty</span>';
+    const id=s?s.streamId:'-';
+    return `<tr class="${s?'occupied':''}">
+    <td><strong>${n}</strong></td>
+    <td>${status}</td>
+    <td class="stream-id">${id}</td>
+    <td><a href="/slot/${n}" target="_blank" class="btn-link">View</a></td>
+    <td><button onclick="clearSlot(${n})" class="btn-clear" ${!s?'disabled':''}>Clear</button></td></tr>`;
+  }).join("");
   res.send(`<!doctype html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Control</title>
-<style>body{font-family:system-ui;margin:20px}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:6px}</style>
+<title>Control Dashboard</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0f0f23;color:#e0e0e0;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    padding:20px;min-height:100vh}
+  .header{text-align:center;margin-bottom:40px}
+  h1{color:#fff;font-size:2em;margin-bottom:10px}
+  .subtitle{color:#888;font-size:1em;margin-bottom:30px}
+  .container{max-width:1200px;margin:0 auto}
+  .grid{display:grid;grid-template-columns:1fr 2fr;gap:30px;margin-bottom:30px}
+  @media(max-width:768px){.grid{grid-template-columns:1fr}}
+  .card{background:#1a1a2e;border-radius:12px;padding:25px;box-shadow:0 4px 20px rgba(0,0,0,0.3)}
+  .qr-card{text-align:center}
+  .qr-card img{border-radius:8px;background:#fff;padding:15px;margin-bottom:15px}
+  .qr-card a{color:#667eea;text-decoration:none;font-weight:500;word-break:break-all}
+  .qr-card a:hover{text-decoration:underline}
+  table{width:100%;border-collapse:collapse}
+  th{background:#252540;color:#fff;padding:12px;text-align:left;font-weight:600;border-bottom:2px solid #667eea}
+  td{padding:12px;border-bottom:1px solid #2a2a3e}
+  tr.occupied{background:#1e1e35}
+  tr:hover{background:#252540}
+  .stream-id{font-family:monospace;font-size:0.9em;color:#888}
+  .badge{display:inline-block;padding:4px 12px;border-radius:12px;font-size:0.85em;font-weight:600}
+  .badge.active{background:#10b981;color:#fff}
+  .badge.empty{background:#374151;color:#9ca3af}
+  .btn-link{color:#667eea;text-decoration:none;font-weight:500;padding:6px 16px;
+    border-radius:6px;background:rgba(102,126,234,0.1);display:inline-block;transition:all 0.2s}
+  .btn-link:hover{background:rgba(102,126,234,0.2);transform:translateY(-1px)}
+  .btn-clear{background:#ef4444;color:#fff;border:none;padding:6px 16px;border-radius:6px;
+    cursor:pointer;font-weight:500;transition:all 0.2s}
+  .btn-clear:hover:not(:disabled){background:#dc2626;transform:translateY(-1px)}
+  .btn-clear:disabled{background:#374151;cursor:not-allowed;opacity:0.5}
+  .stats{display:flex;justify-content:space-around;margin-top:20px;padding-top:20px;border-top:1px solid #2a2a3e}
+  .stat{text-align:center}
+  .stat-value{font-size:2em;font-weight:700;color:#667eea}
+  .stat-label{color:#888;font-size:0.9em;margin-top:5px}
+</style>
 </head><body>
-<h2>Merimac Bridge Control</h2>
-<img src="${qr}" width="180"><p><a href="${PUBLIC_HOST}/join" target="_blank">${PUBLIC_HOST}/join</a></p>
-<table id="t"><tr><th>Slot</th><th>Label</th><th>ID</th><th>Open</th><th></th></tr>${rows}</table>
+<div class="container">
+  <div class="header">
+    <h1>🎬 Merimac Bridge Control</h1>
+    <p class="subtitle">Live camera management dashboard</p>
+  </div>
+  <div class="grid">
+    <div class="card qr-card">
+      <h3 style="margin-bottom:15px">Join Code</h3>
+      <img src="${qr}" width="200">
+      <a href="${PUBLIC_HOST}/join" target="_blank">${PUBLIC_HOST}/join</a>
+      <div class="stats">
+        <div class="stat">
+          <div class="stat-value" id="active-count">0</div>
+          <div class="stat-label">Active</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value">5</div>
+          <div class="stat-label">Total Slots</div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <h3 style="margin-bottom:15px">Camera Slots</h3>
+      <table id="t"><tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>View</th><th>Action</th></tr>${rows}</table>
+    </div>
+  </div>
+</div>
 <script src="/socket.io/socket.io.js"></script>
 <script>
 async function clearSlot(n){await fetch('/api/clear/'+n,{method:'POST'});refresh();}
-async function refresh(){const j=await fetch('/api/state').then(r=>r.json());
-let h='<tr><th>Slot</th><th>Label</th><th>ID</th><th>Open</th><th></th></tr>';
-for(let i=1;i<=5;i++){const s=j.slots[i];h+=\`<tr><td>\${i}</td><td>\${s?s.label:'-'}</td><td>\${s?s.streamId:'-'}</td>
-<td><a href="/slot/\${i}" target="_blank">Open</a></td><td><button onclick="clearSlot(\${i})">Clear</button></td></tr>\`;}
-document.getElementById('t').innerHTML=h;}
+async function refresh(){
+  const j=await fetch('/api/state').then(r=>r.json());
+  let h='<tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>View</th><th>Action</th></tr>';
+  let activeCount=0;
+  for(let i=1;i<=5;i++){
+    const s=j.slots[i];
+    if(s)activeCount++;
+    const status=s?'<span class="badge active">Active</span>':'<span class="badge empty">Empty</span>';
+    const id=s?s.streamId:'-';
+    const rowClass=s?'occupied':'';
+    const disabled=s?'':'disabled';
+    h+=\`<tr class="\${rowClass}">
+    <td><strong>\${i}</strong></td>
+    <td>\${status}</td>
+    <td class="stream-id">\${id}</td>
+    <td><a href="/slot/\${i}" target="_blank" class="btn-link">View</a></td>
+    <td><button onclick="clearSlot(\${i})" class="btn-clear" \${disabled}>Clear</button></td></tr>\`;
+  }
+  document.getElementById('t').innerHTML=h;
+  document.getElementById('active-count').textContent=activeCount;
+}
 io().on('state',refresh);
 </script></body></html>`);
 });
