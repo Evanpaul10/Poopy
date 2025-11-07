@@ -233,6 +233,7 @@ function dashboardLayout(pageName,content){
   return `<!doctype html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>${pageName} - Merimac Bridge</title>
+<script src="/socket.io/socket.io.js"></script>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   body{background:#0f0f23;color:#e0e0e0;
@@ -312,7 +313,6 @@ function dashboardLayout(pageName,content){
     ${content}
   </div>
 </div>
-<script src="/socket.io/socket.io.js"></script>
 </body></html>`;
 }
 
@@ -494,11 +494,21 @@ app.get("/control",async(req,res)=>{
     <script>
     let maxSlots=${MAX_SLOTS};
 
+    // Initialize Socket.IO connection
+    const socket=io();
+    socket.on('connect',()=>console.log('Socket connected'));
+    socket.on('disconnect',()=>console.log('Socket disconnected'));
+    socket.on('connect_error',(err)=>console.error('Socket connection error:',err));
+
     async function loadSettings(){
-      const j=await fetch('/api/state').then(r=>r.json());
-      maxSlots=j.maxSlots||5;
-      document.getElementById('total-slots-input').value=maxSlots;
-      document.getElementById('total-slots').textContent=maxSlots;
+      try{
+        const j=await fetch('/api/state').then(r=>r.json());
+        maxSlots=j.maxSlots||5;
+        document.getElementById('total-slots-input').value=maxSlots;
+        document.getElementById('total-slots').textContent=maxSlots;
+      }catch(e){
+        console.error('Failed to load settings:',e);
+      }
     }
 
     async function applySettings(){
@@ -528,36 +538,44 @@ app.get("/control",async(req,res)=>{
     async function clearSlot(n){await fetch('/api/clear/'+n,{method:'POST'});refresh();}
 
     async function refresh(){
-      const j=await fetch('/api/state').then(r=>r.json());
-      maxSlots=j.maxSlots||maxSlots;
-      let h='<tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>Slot Link</th><th>Action</th></tr>';
-      let activeCount=0;
-      for(let i=1;i<=maxSlots;i++){
-        const s=j.slots[i];
-        if(s)activeCount++;
-        const status=s?'<span class="badge active">Active</span>':'<span class="badge empty">Empty</span>';
-        const id=s?s.streamId:'-';
-        const rowClass=s?'occupied':'';
-        const disabled=s?'':'disabled';
-        const slotUrl='${PUBLIC_HOST}/slot/'+i;
-        h+=\`<tr class="\${rowClass}">
-        <td><strong>\${i}</strong></td>
-        <td>\${status}</td>
-        <td class="stream-id">\${id}</td>
-        <td><a href="/slot/\${i}" target="_blank" class="btn-link">View</a> <button onclick="copySlotUrl('\${slotUrl}')" class="btn-copy">Copy Link</button></td>
-        <td><button onclick="clearSlot(\${i})" class="btn-clear" \${disabled}>Clear</button></td></tr>\`;
+      try{
+        console.log('Refreshing slots...');
+        const j=await fetch('/api/state').then(r=>r.json());
+        maxSlots=j.maxSlots||maxSlots;
+        let h='<tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>Slot Link</th><th>Action</th></tr>';
+        let activeCount=0;
+        for(let i=1;i<=maxSlots;i++){
+          const s=j.slots[i];
+          if(s)activeCount++;
+          const status=s?'<span class="badge active">Active</span>':'<span class="badge empty">Empty</span>';
+          const id=s?s.streamId:'-';
+          const rowClass=s?'occupied':'';
+          const disabled=s?'':'disabled';
+          const slotUrl='${PUBLIC_HOST}/slot/'+i;
+          h+=\`<tr class="\${rowClass}">
+          <td><strong>\${i}</strong></td>
+          <td>\${status}</td>
+          <td class="stream-id">\${id}</td>
+          <td><a href="/slot/\${i}" target="_blank" class="btn-link">View</a> <button onclick="copySlotUrl('\${slotUrl}')" class="btn-copy">Copy Link</button></td>
+          <td><button onclick="clearSlot(\${i})" class="btn-clear" \${disabled}>Clear</button></td></tr>\`;
+        }
+        document.getElementById('t').innerHTML=h;
+        document.getElementById('active-count').textContent=activeCount;
+        console.log('Slots refreshed. Active:',activeCount);
+      }catch(e){
+        console.error('Failed to refresh slots:',e);
       }
-      document.getElementById('t').innerHTML=h;
-      document.getElementById('active-count').textContent=activeCount;
     }
 
     async function updateSystemInfo(){
       try{
+        console.log('Fetching system info...');
         const response=await fetch('/api/system');
         if(!response.ok){
           throw new Error('API responded with '+response.status);
         }
         const info=await response.json();
+        console.log('System info received:',info);
         if(document.getElementById('cpu'))document.getElementById('cpu').textContent=info.cpuUsage||'N/A';
         if(document.getElementById('ram'))document.getElementById('ram').textContent=info.memPercent||'N/A';
         if(document.getElementById('temp'))document.getElementById('temp').textContent=info.temperature||'N/A';
@@ -574,9 +592,13 @@ app.get("/control",async(req,res)=>{
     }
 
     loadSettings();
-    io().on('state',refresh);
+    socket.on('state',(data)=>{
+      console.log('Received state update from server');
+      refresh();
+    });
     updateSystemInfo();
     setInterval(updateSystemInfo,5000);
+    setInterval(refresh,2000);  // Also poll every 2 seconds as backup
     </script>
   `;
   res.send(dashboardLayout('Control',content));
