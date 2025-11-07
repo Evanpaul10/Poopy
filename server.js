@@ -153,52 +153,94 @@ app.get("/api/network",async(r,s)=>{
 
   try{
     const devices=[];
+    let debugInfo={};
 
     // First, ping the network to populate ARP cache
+    console.log('Starting network scan for 192.168.8.x...');
     try{
-      // Ping broadcast address or use nmap/arp-scan if available
-      // Use fping if available, otherwise fall back to a simple ping sweep
-      await execAsync("timeout 3 fping -a -g 192.168.8.0/24 2>/dev/null || for i in {1..254}; do (ping -c 1 -W 1 192.168.8.$i &); done; wait", {timeout: 5000}).catch(()=>{});
-    }catch(e){}
+      // Try fping first (fastest)
+      const fpingResult=await execAsync("fping -a -g 192.168.8.0/24 2>/dev/null",{timeout:8000}).catch(e=>null);
+      if(fpingResult){
+        console.log('fping completed successfully');
+        debugInfo.scanMethod='fping';
+      }else{
+        console.log('fping not available, using arp-scan...');
+        // Try arp-scan (requires root, but very reliable)
+        const arpscanResult=await execAsync("sudo arp-scan -l --interface=eth0 2>/dev/null || sudo arp-scan -l --interface=wlan0 2>/dev/null",{timeout:8000}).catch(e=>null);
+        if(arpscanResult && arpscanResult.stdout){
+          console.log('arp-scan completed successfully');
+          debugInfo.scanMethod='arp-scan';
+          debugInfo.arpscanOutput=arpscanResult.stdout;
+        }else{
+          console.log('arp-scan not available, using ping sweep...');
+          debugInfo.scanMethod='ping-sweep';
+        }
+      }
+    }catch(e){
+      console.error('Network scan error:',e.message);
+      debugInfo.scanError=e.message;
+    }
 
     // Now read ARP table
     try{
-      const {stdout:arp}=await execAsync("ip neigh show || arp -a");
+      const {stdout:arp}=await execAsync("ip neigh show 2>/dev/null || arp -a 2>/dev/null");
+      console.log('ARP table output:',arp);
+      debugInfo.arpTable=arp;
+
       const lines=arp.split('\n');
       for(const line of lines){
-        // Match both ip neigh format and arp -a format
+        if(!line.trim())continue;
+
         let ip, mac;
 
         // Try ip neigh format: "192.168.8.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE"
-        let match=line.match(/^(\d+\.\d+\.\d+\.\d+)\s+.*lladdr\s+([0-9a-f:]+)/i);
+        let match=line.match(/(\d+\.\d+\.\d+\.\d+)\s+dev\s+\S+\s+lladdr\s+([0-9a-f:]+)/i);
         if(match){
           ip=match[1];
           mac=match[2].toUpperCase();
         }else{
-          // Try arp -a format: "? (192.168.8.1) at aa:bb:cc:dd:ee:ff"
+          // Try arp -a format: "? (192.168.8.1) at aa:bb:cc:dd:ee:ff [ether] on eth0"
           match=line.match(/\((\d+\.\d+\.\d+\.\d+)\)\s+at\s+([0-9a-f:]+)/i);
           if(match){
             ip=match[1];
             mac=match[2].toUpperCase();
+          }else{
+            // Try simpler ip neigh format: "192.168.8.1 lladdr aa:bb:cc:dd:ee:ff"
+            match=line.match(/(\d+\.\d+\.\d+\.\d+)\s+lladdr\s+([0-9a-f:]+)/i);
+            if(match){
+              ip=match[1];
+              mac=match[2].toUpperCase();
+            }
           }
         }
 
-        if(ip && mac && ip.startsWith('192.168.8.') && mac!=='00:00:00:00:00:00'){
-          // Try to get hostname
-          let hostname='Unknown';
-          try{
-            const {stdout:host}=await execAsync(`timeout 1 host ${ip} 2>/dev/null`);
-            const hostMatch=host.match(/pointer\s+(.+)\./);
-            if(hostMatch)hostname=hostMatch[1];
-          }catch(e){}
-          devices.push({ip,mac,hostname});
+        if(ip && mac && ip.startsWith('192.168.8.') && mac!=='00:00:00:00:00:00' && !mac.includes('INCOMPLETE')){
+          // Check if already added
+          if(!devices.find(d=>d.ip===ip)){
+            // Try to get hostname
+            let hostname='Unknown';
+            try{
+              const {stdout:host}=await execAsync(`timeout 1 host ${ip} 2>/dev/null || getent hosts ${ip} 2>/dev/null`);
+              if(host){
+                const hostMatch=host.match(/pointer\s+(.+?)\./) || host.match(/\S+\s+(\S+)/);
+                if(hostMatch)hostname=hostMatch[1];
+              }
+            }catch(e){}
+            devices.push({ip,mac,hostname});
+            console.log(`Found device: ${ip} - ${mac} - ${hostname}`);
+          }
         }
       }
-    }catch(e){}
+    }catch(e){
+      console.error('ARP table read error:',e.message);
+      debugInfo.arpError=e.message;
+    }
 
-    s.json({devices});
+    console.log(`Network scan complete. Found ${devices.length} devices.`);
+    s.json({devices,debug:debugInfo});
   }catch(e){
-    s.json({error:e.message,devices:[]});
+    console.error('Network API error:',e);
+    s.json({error:e.message,devices:[],debug:{error:e.message}});
   }
 });
 
@@ -634,11 +676,20 @@ app.get("/network",async(req,res)=>{
     <script>
     async function loadDevices(){
       try{
+        console.log('Loading network devices...');
         const data=await fetch('/api/network').then(r=>r.json());
+        console.log('Network API response:',data);
         const devices=data.devices||[];
         let html='<tr><th>IP Address</th><th>MAC Address</th><th>Hostname</th></tr>';
         if(devices.length===0){
-          html+='<tr><td colspan="3" style="text-align:center;padding:20px;color:#888">No devices found</td></tr>';
+          let debugMsg='No devices found';
+          if(data.debug){
+            debugMsg+='<br><small style="color:#888">Scan method: '+(data.debug.scanMethod||'unknown')+'</small>';
+            if(data.debug.arpTable){
+              debugMsg+='<br><small style="color:#888">ARP entries: '+data.debug.arpTable.split('\\n').length+'</small>';
+            }
+          }
+          html+=\`<tr><td colspan="3" style="text-align:center;padding:20px;color:#888">\${debugMsg}</td></tr>\`;
         }else{
           devices.forEach(d=>{
             html+=\`<tr>
@@ -649,8 +700,10 @@ app.get("/network",async(req,res)=>{
           });
         }
         document.getElementById('device-table').innerHTML=html;
+        console.log(\`Loaded \${devices.length} devices\`);
       }catch(e){
-        document.getElementById('device-table').innerHTML='<tr><td colspan="3" style="text-align:center;padding:20px;color:#ef4444">Error loading devices</td></tr>';
+        console.error('Error loading devices:',e);
+        document.getElementById('device-table').innerHTML='<tr><td colspan="3" style="text-align:center;padding:20px;color:#ef4444">Error loading devices: '+e.message+'</td></tr>';
       }
     }
     async function updateSystemInfo(){
