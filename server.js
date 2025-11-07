@@ -421,197 +421,136 @@ app.get("/control",async(req,res)=>{
     <td><a href="/slot/${n}" target="_blank" class="btn-link">View</a> <button onclick="copySlotUrl('${slotUrl}')" class="btn-copy">Copy Link</button></td>
     <td><button onclick="clearSlot(${n})" class="btn-clear" ${!s?'disabled':''}>Clear</button></td></tr>`;
   }).join("");
-  res.send(`<!doctype html><html><head>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Control Dashboard</title>
-<style>
-  *{margin:0;padding:0;box-sizing:border-box}
-  body{background:#0f0f23;color:#e0e0e0;
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-    padding:20px;min-height:100vh}
-  .header{text-align:center;margin-bottom:40px;position:relative;min-height:80px;display:flex;align-items:center;justify-content:center}
-  .header-title{flex:1;max-width:800px}
-  .system-compact{position:absolute;top:0;right:0;text-align:right;font-size:0.85em;color:#888;line-height:1.6;white-space:nowrap}
-  .system-compact div{margin-bottom:3px}
-  @media(max-width:1024px){.system-compact{font-size:0.75em}}
-  @media(max-width:768px){.header{flex-direction:column;min-height:auto}.system-compact{position:static;margin-top:15px;text-align:center;font-size:0.85em}}
-  h1{color:#fff;font-size:2em;margin-bottom:10px}
-  .subtitle{color:#888;font-size:1em;margin-bottom:30px}
-  .container{max-width:1200px;margin:0 auto}
-  .grid{display:grid;grid-template-columns:1fr 2fr;gap:30px;margin-bottom:30px}
-  @media(max-width:768px){.grid{grid-template-columns:1fr}}
-  .card{background:#1a1a2e;border-radius:12px;padding:25px;box-shadow:0 4px 20px rgba(0,0,0,0.3)}
-  .qr-card{text-align:center}
-  .qr-card img{border-radius:8px;background:#fff;padding:15px;margin-bottom:15px}
-  .qr-card .link-container{margin:15px auto;max-width:280px}
-  .qr-card a{color:#667eea;text-decoration:none;font-weight:500;display:block;
-    word-wrap:break-word;overflow-wrap:break-word;line-height:1.4}
-  .qr-card a:hover{text-decoration:underline}
-  table{width:100%;border-collapse:collapse}
-  th{background:#252540;color:#fff;padding:12px;text-align:left;font-weight:600;border-bottom:2px solid #667eea}
-  td{padding:12px;border-bottom:1px solid #2a2a3e}
-  tr.occupied{background:#1e1e35}
-  tr:hover{background:#252540}
-  .stream-id{font-family:monospace;font-size:0.9em;color:#888}
-  .badge{display:inline-block;padding:4px 12px;border-radius:12px;font-size:0.85em;font-weight:600}
-  .badge.active{background:#10b981;color:#fff}
-  .badge.empty{background:#374151;color:#9ca3af}
-  .btn-link{color:#667eea;text-decoration:none;font-weight:500;padding:6px 16px;
-    border-radius:6px;background:rgba(102,126,234,0.1);display:inline-block;transition:all 0.2s}
-  .btn-link:hover{background:rgba(102,126,234,0.2);transform:translateY(-1px)}
-  .btn-clear{background:#ef4444;color:#fff;border:none;padding:6px 16px;border-radius:6px;
-    cursor:pointer;font-weight:500;transition:all 0.2s}
-  .btn-clear:hover:not(:disabled){background:#dc2626;transform:translateY(-1px)}
-  .btn-clear:disabled{background:#374151;cursor:not-allowed;opacity:0.5}
-  .stats{display:flex;justify-content:space-around;margin-top:20px;padding-top:20px;border-top:1px solid #2a2a3e}
-  .stat{text-align:center}
-  .stat-value{font-size:2em;font-weight:700;color:#667eea}
-  .stat-label{color:#888;font-size:0.9em;margin-top:5px}
-  .settings-box{margin-top:20px;padding-top:20px;border-top:1px solid #2a2a3e}
-  .settings-box h3{margin-bottom:15px;font-size:1em}
-  .settings-row{display:flex;gap:15px;align-items:center;margin-bottom:15px}
-  .settings-row label{color:#e0e0e0;font-weight:500;flex:1}
-  .settings-row input{background:#252540;border:1px solid #667eea;color:#fff;
-    padding:8px 12px;border-radius:6px;width:100px;font-size:1em}
-  .settings-row input:focus{outline:none;border-color:#764ba2}
-  .btn-apply{background:#667eea;color:#fff;border:none;padding:8px 20px;
-    border-radius:6px;cursor:pointer;font-weight:500;transition:all 0.2s;width:100%}
-  .btn-apply:hover{background:#764ba2;transform:translateY(-1px)}
-  .btn-copy{background:#667eea;color:#fff;border:none;padding:6px 12px;border-radius:6px;
-    cursor:pointer;font-weight:500;transition:all 0.2s;font-size:0.85em}
-  .btn-copy:hover{background:#764ba2;transform:translateY(-1px)}
-  .btn-copy:active{background:#5a67d8}
-</style>
-</head><body>
-<div class="container">
-  <div class="header">
-    <div class="system-compact" id="system-info-compact">
-      <div>CPU: <span id="cpu">-</span></div>
-      <div>RAM: <span id="ram">-</span></div>
-      <div>Temp: <span id="temp">-</span></div>
-      <div>Disk: <span id="disk">-</span> (<span id="disk-avail">-</span> free)</div>
-      <div>Net: ↓<span id="net-rx">-</span> ↑<span id="net-tx">-</span></div>
-      <div>Uptime: <span id="uptime">-</span></div>
-    </div>
-    <div class="header-title">
-      <h1>Merimac Video Ninja Bridge</h1>
-      <p class="subtitle">Live camera management dashboard</p>
-    </div>
-  </div>
-  <div class="grid">
-    <div class="card qr-card">
-      <h3 style="margin-bottom:15px">Join Code</h3>
-      <img src="${qr}" width="200">
-      <div class="link-container">
-        <a href="${PUBLIC_HOST}/join" target="_blank">${PUBLIC_HOST}/join</a>
+
+  const content=`
+    <div class="header">
+      <div class="system-compact" id="system-info-compact">
+        <div>CPU: <span id="cpu">-</span></div>
+        <div>RAM: <span id="ram">-</span></div>
+        <div>Temp: <span id="temp">-</span></div>
+        <div>Disk: <span id="disk">-</span> (<span id="disk-avail">-</span> free)</div>
+        <div>Net: ↓<span id="net-rx">-</span> ↑<span id="net-tx">-</span></div>
+        <div>Uptime: <span id="uptime">-</span></div>
       </div>
-      <div class="stats">
-        <div class="stat">
-          <div class="stat-value" id="active-count">0</div>
-          <div class="stat-label">Active</div>
-        </div>
-        <div class="stat">
-          <div class="stat-value" id="total-slots">5</div>
-          <div class="stat-label">Total Slots</div>
-        </div>
-      </div>
-      <div class="settings-box">
-        <h3>Slot Configuration</h3>
-        <div class="settings-row">
-          <label>Total Slots:</label>
-          <input type="number" id="total-slots-input" value="5" min="1" max="50">
-        </div>
-        <button class="btn-apply" onclick="applySettings()">Apply</button>
+      <div class="header-title">
+        <h1>Merimac Video Ninja Bridge</h1>
+        <p class="subtitle">Live camera management dashboard</p>
       </div>
     </div>
-    <div class="card">
-      <h3 style="margin-bottom:15px">Camera Slots</h3>
-      <table id="t"><tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>Slot Link</th><th>Action</th></tr>${rows}</table>
+    <div class="grid">
+      <div class="card qr-card">
+        <h3 style="margin-bottom:15px">Join Code</h3>
+        <img src="${qr}" width="200">
+        <div class="link-container">
+          <a href="${PUBLIC_HOST}/join" target="_blank">${PUBLIC_HOST}/join</a>
+        </div>
+        <div class="stats">
+          <div class="stat">
+            <div class="stat-value" id="active-count">0</div>
+            <div class="stat-label">Active</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value" id="total-slots">5</div>
+            <div class="stat-label">Total Slots</div>
+          </div>
+        </div>
+        <div class="settings-box">
+          <h3>Slot Configuration</h3>
+          <div class="settings-row">
+            <label>Total Slots:</label>
+            <input type="number" id="total-slots-input" value="5" min="1" max="50">
+          </div>
+          <button class="btn-apply" onclick="applySettings()">Apply</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3 style="margin-bottom:15px">Camera Slots</h3>
+        <table id="t"><tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>Slot Link</th><th>Action</th></tr>${rows}</table>
+      </div>
     </div>
-  </div>
-</div>
-<script src="/socket.io/socket.io.js"></script>
-<script>
-let maxSlots=5;
+    <script>
+    let maxSlots=5;
 
-async function loadSettings(){
-  const j=await fetch('/api/state').then(r=>r.json());
-  maxSlots=j.maxSlots||5;
-  document.getElementById('total-slots-input').value=maxSlots;
-  document.getElementById('total-slots').textContent=maxSlots;
-}
+    async function loadSettings(){
+      const j=await fetch('/api/state').then(r=>r.json());
+      maxSlots=j.maxSlots||5;
+      document.getElementById('total-slots-input').value=maxSlots;
+      document.getElementById('total-slots').textContent=maxSlots;
+    }
 
-async function applySettings(){
-  const total=parseInt(document.getElementById('total-slots-input').value);
-  if(total<1||total>50){alert('Total slots must be between 1 and 50');return;}
-  const res=await fetch('/api/config',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({maxSlots:total})
-  });
-  const j=await res.json();
-  if(j.ok){
-    maxSlots=j.maxSlots;
-    document.getElementById('total-slots').textContent=maxSlots;
-    refresh();
-  }else{
-    alert(j.error||'Failed to update settings');
-  }
-}
+    async function applySettings(){
+      const total=parseInt(document.getElementById('total-slots-input').value);
+      if(total<1||total>50){alert('Total slots must be between 1 and 50');return;}
+      const res=await fetch('/api/config',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({maxSlots:total})
+      });
+      const j=await res.json();
+      if(j.ok){
+        maxSlots=j.maxSlots;
+        document.getElementById('total-slots').textContent=maxSlots;
+        refresh();
+      }else{
+        alert(j.error||'Failed to update settings');
+      }
+    }
 
-function copySlotUrl(url){
-  navigator.clipboard.writeText(url).then(()=>{
-    // Could add visual feedback here
-  }).catch(err=>console.error('Copy failed:',err));
-}
+    function copySlotUrl(url){
+      navigator.clipboard.writeText(url).then(()=>{
+        // Could add visual feedback here
+      }).catch(err=>console.error('Copy failed:',err));
+    }
 
-async function clearSlot(n){await fetch('/api/clear/'+n,{method:'POST'});refresh();}
+    async function clearSlot(n){await fetch('/api/clear/'+n,{method:'POST'});refresh();}
 
-async function refresh(){
-  const j=await fetch('/api/state').then(r=>r.json());
-  maxSlots=j.maxSlots||maxSlots;
-  let h='<tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>Slot Link</th><th>Action</th></tr>';
-  let activeCount=0;
-  for(let i=1;i<=maxSlots;i++){
-    const s=j.slots[i];
-    if(s)activeCount++;
-    const status=s?'<span class="badge active">Active</span>':'<span class="badge empty">Empty</span>';
-    const id=s?s.streamId:'-';
-    const rowClass=s?'occupied':'';
-    const disabled=s?'':'disabled';
-    const slotUrl='${PUBLIC_HOST}/slot/'+i;
-    h+=\`<tr class="\${rowClass}">
-    <td><strong>\${i}</strong></td>
-    <td>\${status}</td>
-    <td class="stream-id">\${id}</td>
-    <td><a href="/slot/\${i}" target="_blank" class="btn-link">View</a> <button onclick="copySlotUrl('\${slotUrl}')" class="btn-copy">Copy Link</button></td>
-    <td><button onclick="clearSlot(\${i})" class="btn-clear" \${disabled}>Clear</button></td></tr>\`;
-  }
-  document.getElementById('t').innerHTML=h;
-  document.getElementById('active-count').textContent=activeCount;
-}
+    async function refresh(){
+      const j=await fetch('/api/state').then(r=>r.json());
+      maxSlots=j.maxSlots||maxSlots;
+      let h='<tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>Slot Link</th><th>Action</th></tr>';
+      let activeCount=0;
+      for(let i=1;i<=maxSlots;i++){
+        const s=j.slots[i];
+        if(s)activeCount++;
+        const status=s?'<span class="badge active">Active</span>':'<span class="badge empty">Empty</span>';
+        const id=s?s.streamId:'-';
+        const rowClass=s?'occupied':'';
+        const disabled=s?'':'disabled';
+        const slotUrl='${PUBLIC_HOST}/slot/'+i;
+        h+=\`<tr class="\${rowClass}">
+        <td><strong>\${i}</strong></td>
+        <td>\${status}</td>
+        <td class="stream-id">\${id}</td>
+        <td><a href="/slot/\${i}" target="_blank" class="btn-link">View</a> <button onclick="copySlotUrl('\${slotUrl}')" class="btn-copy">Copy Link</button></td>
+        <td><button onclick="clearSlot(\${i})" class="btn-clear" \${disabled}>Clear</button></td></tr>\`;
+      }
+      document.getElementById('t').innerHTML=h;
+      document.getElementById('active-count').textContent=activeCount;
+    }
 
-async function updateSystemInfo(){
-  try{
-    const info=await fetch('/api/system').then(r=>r.json());
-    document.getElementById('cpu').textContent=info.cpuUsage||'N/A';
-    document.getElementById('ram').textContent=info.memPercent||'N/A';
-    document.getElementById('temp').textContent=info.temperature||'N/A';
-    document.getElementById('disk').textContent=info.diskPercent||'N/A';
-    document.getElementById('disk-avail').textContent=info.diskAvailable||'N/A';
-    document.getElementById('net-rx').textContent=info.networkRx||'N/A';
-    document.getElementById('net-tx').textContent=info.networkTx||'N/A';
-    document.getElementById('uptime').textContent=info.uptime||'N/A';
-  }catch(e){
-    console.error('Failed to fetch system info:',e);
-  }
-}
+    async function updateSystemInfo(){
+      try{
+        const info=await fetch('/api/system').then(r=>r.json());
+        document.getElementById('cpu').textContent=info.cpuUsage||'N/A';
+        document.getElementById('ram').textContent=info.memPercent||'N/A';
+        document.getElementById('temp').textContent=info.temperature||'N/A';
+        document.getElementById('disk').textContent=info.diskPercent||'N/A';
+        document.getElementById('disk-avail').textContent=info.diskAvailable||'N/A';
+        document.getElementById('net-rx').textContent=info.networkRx||'N/A';
+        document.getElementById('net-tx').textContent=info.networkTx||'N/A';
+        document.getElementById('uptime').textContent=info.uptime||'N/A';
+      }catch(e){
+        console.error('Failed to fetch system info:',e);
+      }
+    }
 
-loadSettings();
-io().on('state',refresh);
-updateSystemInfo();
-setInterval(updateSystemInfo,5000); // Update system info every 5 seconds
-</script></body></html>`);
+    loadSettings();
+    io().on('state',refresh);
+    updateSystemInfo();
+    setInterval(updateSystemInfo,5000);
+    </script>
+  `;
+  res.send(dashboardLayout('Control',content));
 });
 
 // Network page
