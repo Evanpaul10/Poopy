@@ -120,7 +120,25 @@ app.get("/api/system",async(r,s)=>{
       const parts=disk.split(/\s+/);
       info.diskUsage=`${parts[2]} / ${parts[1]}`;
       info.diskPercent=parts[4];
-    }catch(e){info.diskUsage='N/A';info.diskPercent='N/A';}
+      info.diskAvailable=parts[3];
+    }catch(e){info.diskUsage='N/A';info.diskPercent='N/A';info.diskAvailable='N/A';}
+
+    // Network usage
+    try{
+      const {stdout:net}=await execAsync("cat /proc/net/dev | grep -E 'eth0|wlan0|enp|wlp' | head -1");
+      if(net){
+        const parts=net.trim().split(/\s+/);
+        const rxBytes=parseInt(parts[1]);
+        const txBytes=parseInt(parts[9]);
+        const rxGB=(rxBytes/(1024*1024*1024)).toFixed(2);
+        const txGB=(txBytes/(1024*1024*1024)).toFixed(2);
+        info.networkRx=rxGB+'GB';
+        info.networkTx=txGB+'GB';
+      }else{
+        info.networkRx='N/A';
+        info.networkTx='N/A';
+      }
+    }catch(e){info.networkRx='N/A';info.networkTx='N/A';}
 
     s.json(info);
   }catch(e){
@@ -262,10 +280,10 @@ app.get("/control",async(req,res)=>{
     padding:20px;min-height:100vh}
   .header{text-align:center;margin-bottom:40px;position:relative;min-height:80px;display:flex;align-items:center;justify-content:center}
   .header-title{flex:1;max-width:800px}
-  .system-compact{position:absolute;top:0;right:0;text-align:right;font-size:0.7em;color:#888;line-height:1.5;white-space:nowrap}
-  .system-compact div{margin-bottom:2px}
-  @media(max-width:1024px){.system-compact{font-size:0.65em}}
-  @media(max-width:768px){.header{flex-direction:column;min-height:auto}.system-compact{position:static;margin-top:15px;text-align:center;font-size:0.75em}}
+  .system-compact{position:absolute;top:0;right:0;text-align:right;font-size:0.85em;color:#888;line-height:1.6;white-space:nowrap}
+  .system-compact div{margin-bottom:3px}
+  @media(max-width:1024px){.system-compact{font-size:0.75em}}
+  @media(max-width:768px){.header{flex-direction:column;min-height:auto}.system-compact{position:static;margin-top:15px;text-align:center;font-size:0.85em}}
   h1{color:#fff;font-size:2em;margin-bottom:10px}
   .subtitle{color:#888;font-size:1em;margin-bottom:30px}
   .container{max-width:1200px;margin:0 auto}
@@ -320,8 +338,9 @@ app.get("/control",async(req,res)=>{
       <div>CPU: <span id="cpu">-</span></div>
       <div>RAM: <span id="ram">-</span></div>
       <div>Temp: <span id="temp">-</span></div>
+      <div>Disk: <span id="disk">-</span> (<span id="disk-avail">-</span> free)</div>
+      <div>Net: ↓<span id="net-rx">-</span> ↑<span id="net-tx">-</span></div>
       <div>Uptime: <span id="uptime">-</span></div>
-      <div>Disk: <span id="disk">-</span></div>
     </div>
     <div class="header-title">
       <h1>Merimac Video Ninja Bridge</h1>
@@ -427,8 +446,11 @@ async function updateSystemInfo(){
     document.getElementById('cpu').textContent=info.cpuUsage||'N/A';
     document.getElementById('ram').textContent=info.memPercent||'N/A';
     document.getElementById('temp').textContent=info.temperature||'N/A';
-    document.getElementById('uptime').textContent=info.uptime||'N/A';
     document.getElementById('disk').textContent=info.diskPercent||'N/A';
+    document.getElementById('disk-avail').textContent=info.diskAvailable||'N/A';
+    document.getElementById('net-rx').textContent=info.networkRx||'N/A';
+    document.getElementById('net-tx').textContent=info.networkTx||'N/A';
+    document.getElementById('uptime').textContent=info.uptime||'N/A';
   }catch(e){
     console.error('Failed to fetch system info:',e);
   }
