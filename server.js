@@ -156,24 +156,34 @@ app.get("/api/network",async(r,s)=>{
     let debugInfo={};
 
     // First, ping the network to populate ARP cache
-    console.log('Starting network scan for 192.168.8.x...');
+    console.log('Starting network scan for all devices...');
     try{
+      // Get current network interface and subnet
+      const {stdout:ipInfo}=await execAsync("ip route | grep default | head -1").catch(()=>({stdout:''}));
+      console.log('IP route info:',ipInfo);
+
       // Try fping first (fastest)
-      const fpingResult=await execAsync("fping -a -g 192.168.8.0/24 2>/dev/null",{timeout:8000}).catch(e=>null);
-      if(fpingResult){
+      const fpingResult=await execAsync("fping -a -g 192.168.8.0/24",{timeout:8000}).catch(e=>{
+        console.log('fping error:',e.message);
+        return null;
+      });
+      if(fpingResult && fpingResult.stdout){
         console.log('fping completed successfully');
         debugInfo.scanMethod='fping';
       }else{
-        console.log('fping not available, using arp-scan...');
+        console.log('fping did not complete, trying arp-scan...');
         // Try arp-scan (requires root, but very reliable)
-        const arpscanResult=await execAsync("sudo arp-scan -l --interface=eth0 2>/dev/null || sudo arp-scan -l --interface=wlan0 2>/dev/null",{timeout:8000}).catch(e=>null);
+        const arpscanResult=await execAsync("sudo arp-scan -l",{timeout:8000}).catch(e=>{
+          console.log('arp-scan error:',e.message);
+          return null;
+        });
         if(arpscanResult && arpscanResult.stdout){
           console.log('arp-scan completed successfully');
           debugInfo.scanMethod='arp-scan';
           debugInfo.arpscanOutput=arpscanResult.stdout;
         }else{
-          console.log('arp-scan not available, using ping sweep...');
-          debugInfo.scanMethod='ping-sweep';
+          console.log('Using existing ARP table only');
+          debugInfo.scanMethod='arp-table-only';
         }
       }
     }catch(e){
@@ -188,6 +198,7 @@ app.get("/api/network",async(r,s)=>{
       debugInfo.arpTable=arp;
 
       const lines=arp.split('\n');
+      const unmatchedLines=[];
       for(const line of lines){
         if(!line.trim())continue;
 
@@ -210,11 +221,22 @@ app.get("/api/network",async(r,s)=>{
             if(match){
               ip=match[1];
               mac=match[2].toUpperCase();
+            }else{
+              // Try even simpler format: just IP and MAC anywhere in line
+              match=line.match(/(\d+\.\d+\.\d+\.\d+).*?([0-9a-f]{1,2}:[0-9a-f]{1,2}:[0-9a-f]{1,2}:[0-9a-f]{1,2}:[0-9a-f]{1,2}:[0-9a-f]{1,2})/i);
+              if(match){
+                ip=match[1];
+                mac=match[2].toUpperCase();
+              }else{
+                // Couldn't parse this line
+                unmatchedLines.push(line);
+              }
             }
           }
         }
 
-        if(ip && mac && ip.startsWith('192.168.8.') && mac!=='00:00:00:00:00:00' && !mac.includes('INCOMPLETE')){
+        // Show ALL devices, not just 192.168.8.x
+        if(ip && mac && mac!=='00:00:00:00:00:00' && !mac.includes('INCOMPLETE')){
           // Check if already added
           if(!devices.find(d=>d.ip===ip)){
             // Try to get hostname
@@ -230,6 +252,11 @@ app.get("/api/network",async(r,s)=>{
             console.log(`Found device: ${ip} - ${mac} - ${hostname}`);
           }
         }
+      }
+
+      if(unmatchedLines.length>0){
+        console.log('Unmatched ARP lines:',unmatchedLines);
+        debugInfo.unmatchedLines=unmatchedLines;
       }
     }catch(e){
       console.error('ARP table read error:',e.message);
@@ -660,7 +687,7 @@ app.get("/network",async(req,res)=>{
       </div>
       <div class="header-title">
         <h1>Network Devices</h1>
-        <p class="subtitle">Devices on 192.168.8.x network</p>
+        <p class="subtitle">All devices on the local network</p>
       </div>
     </div>
     <div class="card">
@@ -686,10 +713,17 @@ app.get("/network",async(req,res)=>{
           if(data.debug){
             debugMsg+='<br><small style="color:#888">Scan method: '+(data.debug.scanMethod||'unknown')+'</small>';
             if(data.debug.arpTable){
-              debugMsg+='<br><small style="color:#888">ARP entries: '+data.debug.arpTable.split('\\n').length+'</small>';
+              const arpLines=data.debug.arpTable.split('\\n').filter(l=>l.trim());
+              debugMsg+='<br><small style="color:#888">ARP entries: '+arpLines.length+'</small>';
+            }
+            if(data.debug.unmatchedLines && data.debug.unmatchedLines.length>0){
+              debugMsg+='<br><br><small style="color:#ff8888">Unmatched ARP lines ('+data.debug.unmatchedLines.length+'):</small>';
+              data.debug.unmatchedLines.forEach(line=>{
+                debugMsg+='<br><small style="color:#888;font-family:monospace">'+line+'</small>';
+              });
             }
           }
-          html+=\`<tr><td colspan="3" style="text-align:center;padding:20px;color:#888">\${debugMsg}</td></tr>\`;
+          html+=\`<tr><td colspan="3" style="text-align:center;padding:20px;color:#888;line-height:1.8">\${debugMsg}</td></tr>\`;
         }else{
           devices.forEach(d=>{
             html+=\`<tr>
