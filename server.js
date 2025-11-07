@@ -491,6 +491,7 @@ app.post("/api/cameras/scan",requireAuth,async(r,s)=>{
 
   try{
     const foundCameras=[];
+    const {customSubnet}=r.body||{};
 
     // Get all network interfaces
     const os=require("os");
@@ -510,7 +511,18 @@ app.post("/api/cameras/scan",requireAuth,async(r,s)=>{
       }
     }
 
-    console.log('Scanning subnets:',Array.from(subnets));
+    // If custom subnet provided, use only that
+    if(customSubnet){
+      subnets.clear();
+      subnets.add(customSubnet);
+      console.log('Scanning custom subnet:',customSubnet);
+    }else{
+      // Also scan common home network ranges even if not directly connected
+      const commonSubnets=['192.168.0','192.168.1','192.168.4','192.168.8','10.0.0','10.0.1'];
+      commonSubnets.forEach(s=>subnets.add(s));
+      console.log('Scanning local + common subnets:',Array.from(subnets));
+    }
+
     console.log('Local IPs to exclude:',Array.from(localIPs));
 
     // Helper function to check a single IP
@@ -1869,10 +1881,15 @@ app.get("/camera-control",requireAuth,async(req,res)=>{
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;gap:10px;flex-wrap:wrap">
         <h3>Camera Management</h3>
-        <div style="display:flex;gap:10px">
-          <button class="btn-refresh" id="scan-btn" onclick="scanForCameras()">Auto-Scan Network</button>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+          <input type="text" id="custom-subnet" placeholder="Optional: 192.168.4 or 10.0.1"
+            style="padding:8px 12px;background:#252540;border:1px solid #667eea;color:#fff;border-radius:6px;min-width:180px">
+          <button class="btn-refresh" id="scan-btn" onclick="scanWithCustomSubnet()">Auto-Scan Network</button>
           <button class="btn-apply" onclick="showAddCameraForm()" style="width:auto;padding:8px 20px">+ Add Camera</button>
         </div>
+      </div>
+      <div style="margin-bottom:15px;padding:10px;background:#1e1e35;border-radius:6px;font-size:0.9em;color:#888">
+        💡 <strong>Tip:</strong> Auto-scan checks common networks (192.168.0/1/4/8, 10.0.0/1). Enter a custom subnet above to scan a specific network (e.g., "192.168.4" for 192.168.4.0-255).
       </div>
 
       <div id="add-camera-form" style="display:none;margin-bottom:20px;padding:20px;background:#252540;border-radius:8px">
@@ -2100,17 +2117,31 @@ app.get("/camera-control",requireAuth,async(req,res)=>{
       \`;
     }
 
-    async function scanForCameras(){
+    function scanWithCustomSubnet(){
+      const customSubnet=document.getElementById('custom-subnet').value.trim();
+      scanForCameras(customSubnet||null);
+    }
+
+    async function scanForCameras(customSubnet=null){
       const btn=document.getElementById('scan-btn');
       btn.disabled=true;
       btn.textContent='Scanning...';
 
       try{
-        const data=await fetch('/api/cameras/scan',{method:'POST'}).then(r=>r.json());
+        const body=customSubnet?{customSubnet}:{};
+        const data=await fetch('/api/cameras/scan',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(body)
+        }).then(r=>r.json());
         scannedCameras=data.cameras||[];
 
+        // Show which subnets were scanned
+        const subnetsScanned=data.scannedSubnets?data.scannedSubnets.join(', '):'unknown';
+        console.log('Scanned subnets:',subnetsScanned);
+
         if(scannedCameras.length===0){
-          showToast('No cameras found on the network','info');
+          showToast(\`No cameras found. Scanned: \${subnetsScanned}\`,'info');
           document.getElementById('scan-results').style.display='none';
         }else{
           document.getElementById('scan-count').textContent=scannedCameras.length;
@@ -2123,7 +2154,7 @@ app.get("/camera-control",requireAuth,async(req,res)=>{
           });
           document.getElementById('scan-list').innerHTML=html;
           document.getElementById('scan-results').style.display='block';
-          showToast(\`Found \${scannedCameras.length} camera(s)\`,'success');
+          showToast(\`Found \${scannedCameras.length} camera(s) on \${subnetsScanned}\`,'success');
         }
       }catch(e){
         console.error('Scan error:',e);
