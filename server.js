@@ -6,6 +6,8 @@ const http = require("http");
 const { Server } = require("socket.io");
 const QRCode = require("qrcode");
 const session = require("express-session");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
 const server = http.createServer(app);
@@ -19,10 +21,100 @@ const ROOM = "MERIMAC";
 const INACTIVITY_MS = 8_000;  // Clear inactive slots after 8 seconds
 const GRACE_MS = 5_000;        // 5 second grace period on initial connection
 
-// Authentication credentials
-const AUTH_USERNAME = "admin";
-const AUTH_PASSWORD = "Cameldog99#";
-const RESET_PIN = "898989";
+// Settings file path
+const SETTINGS_FILE = path.join(__dirname, 'bridge-settings.json');
+const ACTIVITY_LOG_FILE = path.join(__dirname, 'activity-log.json');
+
+// Default settings
+let SETTINGS = {
+  username: "admin",
+  password: "Cameldog99#",
+  resetPin: "898989",
+  maxSlots: 5,
+  bitrate: 2500,
+  networkRefreshInterval: 5 // minutes
+};
+
+// Activity log (in-memory with file backup)
+let ACTIVITY_LOG = [];
+
+// Login attempt tracking for rate limiting
+const loginAttempts = new Map(); // IP -> {count, lastAttempt, lockedUntil}
+
+// Load settings from file
+function loadSettings() {
+  try {
+    if (fs.existsSync(SETTINGS_FILE)) {
+      const data = fs.readFileSync(SETTINGS_FILE, 'utf8');
+      const loaded = JSON.parse(data);
+      SETTINGS = { ...SETTINGS, ...loaded };
+      console.log('Settings loaded from file');
+    }
+  } catch (e) {
+    console.error('Error loading settings:', e.message);
+  }
+}
+
+// Save settings to file
+function saveSettings() {
+  try {
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(SETTINGS, null, 2));
+    console.log('Settings saved to file');
+  } catch (e) {
+    console.error('Error saving settings:', e.message);
+  }
+}
+
+// Load activity log
+function loadActivityLog() {
+  try {
+    if (fs.existsSync(ACTIVITY_LOG_FILE)) {
+      const data = fs.readFileSync(ACTIVITY_LOG_FILE, 'utf8');
+      ACTIVITY_LOG = JSON.parse(data);
+      // Keep only last 500 entries
+      if (ACTIVITY_LOG.length > 500) {
+        ACTIVITY_LOG = ACTIVITY_LOG.slice(-500);
+      }
+      console.log(`Activity log loaded: ${ACTIVITY_LOG.length} entries`);
+    }
+  } catch (e) {
+    console.error('Error loading activity log:', e.message);
+  }
+}
+
+// Save activity log
+function saveActivityLog() {
+  try {
+    fs.writeFileSync(ACTIVITY_LOG_FILE, JSON.stringify(ACTIVITY_LOG, null, 2));
+  } catch (e) {
+    console.error('Error saving activity log:', e.message);
+  }
+}
+
+// Add activity log entry
+function logActivity(type, message, slotNumber = null) {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    type, // 'join', 'leave', 'clear', 'system'
+    message,
+    slot: slotNumber
+  };
+  ACTIVITY_LOG.push(entry);
+  // Keep only last 500 entries in memory
+  if (ACTIVITY_LOG.length > 500) {
+    ACTIVITY_LOG.shift();
+  }
+  // Save periodically (every 10 entries)
+  if (ACTIVITY_LOG.length % 10 === 0) {
+    saveActivityLog();
+  }
+  // Emit to connected clients
+  io.emit('activity', entry);
+}
+
+// Load settings on startup
+loadSettings();
+loadActivityLog();
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
