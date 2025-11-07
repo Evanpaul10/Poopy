@@ -169,7 +169,7 @@ document.getElementById("go").onclick=async()=>{
   const j=await r.json(); if(!j.ok){w.close();return alert("All slots full");}
   const n=j.slot;
   w.location="${VDO}/?push="+encodeURIComponent(streamId)
-             +"&label=cam"+n+"&bitrate=2500&codec=h264&autostart&webcam";
+             +"&label=cam"+n+"&bitrate=2500&codec=h264&autostart&webcam&muted";
   document.getElementById("msg").innerHTML='<div class="status">✅ Connected as Camera '+n+'</div><br>Keep this page open during the show';
 };
 </script></body></html>`);
@@ -244,11 +244,12 @@ app.get("/control",async(req,res)=>{
   const rows=Object.entries(SLOTS).map(([n,s])=>{
     const status=s?'<span class="badge active">Active</span>':'<span class="badge empty">Empty</span>';
     const id=s?s.streamId:'-';
+    const slotUrl=`${PUBLIC_HOST}/slot/${n}`;
     return `<tr class="${s?'occupied':''}">
     <td><strong>${n}</strong></td>
     <td>${status}</td>
     <td class="stream-id">${id}</td>
-    <td><a href="/slot/${n}" target="_blank" class="btn-link">View</a></td>
+    <td><a href="/slot/${n}" target="_blank" class="btn-link">View</a> <button onclick="copySlotUrl('${slotUrl}')" class="btn-copy">Copy Link</button></td>
     <td><button onclick="clearSlot(${n})" class="btn-clear" ${!s?'disabled':''}>Clear</button></td></tr>`;
   }).join("");
   res.send(`<!doctype html><html><head>
@@ -261,7 +262,7 @@ app.get("/control",async(req,res)=>{
     padding:20px;min-height:100vh}
   .header{text-align:center;margin-bottom:40px;position:relative}
   .header-title{display:inline-block}
-  .system-compact{position:absolute;top:0;right:0;text-align:left;font-size:0.75em;color:#888;line-height:1.6}
+  .system-compact{position:absolute;top:0;right:35%;text-align:left;font-size:0.75em;color:#888;line-height:1.6}
   .system-compact div{margin-bottom:3px}
   @media(max-width:768px){.system-compact{position:static;margin-top:20px;text-align:center}}
   h1{color:#fff;font-size:2em;margin-bottom:10px}
@@ -306,9 +307,10 @@ app.get("/control",async(req,res)=>{
   .btn-apply{background:#667eea;color:#fff;border:none;padding:8px 20px;
     border-radius:6px;cursor:pointer;font-weight:500;transition:all 0.2s;width:100%}
   .btn-apply:hover{background:#764ba2;transform:translateY(-1px)}
-  .slot-num{cursor:pointer;user-select:none}
-  .slot-num:hover{color:#667eea}
-  .slot-num:active{color:#764ba2}
+  .btn-copy{background:#667eea;color:#fff;border:none;padding:6px 12px;border-radius:6px;
+    cursor:pointer;font-weight:500;transition:all 0.2s;font-size:0.85em}
+  .btn-copy:hover{background:#764ba2;transform:translateY(-1px)}
+  .btn-copy:active{background:#5a67d8}
 </style>
 </head><body>
 <div class="container">
@@ -353,7 +355,7 @@ app.get("/control",async(req,res)=>{
     </div>
     <div class="card">
       <h3 style="margin-bottom:15px">Camera Slots</h3>
-      <table id="t"><tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>View</th><th>Action</th></tr>${rows}</table>
+      <table id="t"><tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>Slot Link</th><th>Action</th></tr>${rows}</table>
     </div>
   </div>
 </div>
@@ -386,9 +388,9 @@ async function applySettings(){
   }
 }
 
-function copyToClipboard(text){
-  navigator.clipboard.writeText(text).then(()=>{
-    // Show brief feedback (optional)
+function copySlotUrl(url){
+  navigator.clipboard.writeText(url).then(()=>{
+    // Could add visual feedback here
   }).catch(err=>console.error('Copy failed:',err));
 }
 
@@ -397,7 +399,7 @@ async function clearSlot(n){await fetch('/api/clear/'+n,{method:'POST'});refresh
 async function refresh(){
   const j=await fetch('/api/state').then(r=>r.json());
   maxSlots=j.maxSlots||maxSlots;
-  let h='<tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>View</th><th>Action</th></tr>';
+  let h='<tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>Slot Link</th><th>Action</th></tr>';
   let activeCount=0;
   for(let i=1;i<=maxSlots;i++){
     const s=j.slots[i];
@@ -406,11 +408,12 @@ async function refresh(){
     const id=s?s.streamId:'-';
     const rowClass=s?'occupied':'';
     const disabled=s?'':'disabled';
+    const slotUrl='${PUBLIC_HOST}/slot/'+i;
     h+=\`<tr class="\${rowClass}">
-    <td><strong class="slot-num" onclick="copyToClipboard('\${i}')" title="Click to copy slot number">\${i}</strong></td>
+    <td><strong>\${i}</strong></td>
     <td>\${status}</td>
     <td class="stream-id">\${id}</td>
-    <td><a href="/slot/\${i}" target="_blank" class="btn-link">View</a></td>
+    <td><a href="/slot/\${i}" target="_blank" class="btn-link">View</a> <button onclick="copySlotUrl('\${slotUrl}')" class="btn-copy">Copy Link</button></td>
     <td><button onclick="clearSlot(\${i})" class="btn-clear" \${disabled}>Clear</button></td></tr>\`;
   }
   document.getElementById('t').innerHTML=h;
