@@ -259,13 +259,16 @@ app.get("/control",async(req,res)=>{
   body{background:#0f0f23;color:#e0e0e0;
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
     padding:20px;min-height:100vh}
-  .header{text-align:center;margin-bottom:40px}
+  .header{text-align:center;margin-bottom:40px;position:relative}
+  .header-title{display:inline-block}
+  .system-compact{position:absolute;top:0;right:0;text-align:left;font-size:0.75em;color:#888;line-height:1.6}
+  .system-compact div{margin-bottom:3px}
+  @media(max-width:768px){.system-compact{position:static;margin-top:20px;text-align:center}}
   h1{color:#fff;font-size:2em;margin-bottom:10px}
   .subtitle{color:#888;font-size:1em;margin-bottom:30px}
   .container{max-width:1200px;margin:0 auto}
   .grid{display:grid;grid-template-columns:1fr 2fr;gap:30px;margin-bottom:30px}
   @media(max-width:768px){.grid{grid-template-columns:1fr}}
-  .grid-full{display:grid;grid-template-columns:1fr;gap:30px;margin-bottom:30px}
   .card{background:#1a1a2e;border-radius:12px;padding:25px;box-shadow:0 4px 20px rgba(0,0,0,0.3)}
   .qr-card{text-align:center}
   .qr-card img{border-radius:8px;background:#fff;padding:15px;margin-bottom:15px}
@@ -303,17 +306,24 @@ app.get("/control",async(req,res)=>{
   .btn-apply{background:#667eea;color:#fff;border:none;padding:8px 20px;
     border-radius:6px;cursor:pointer;font-weight:500;transition:all 0.2s;width:100%}
   .btn-apply:hover{background:#764ba2;transform:translateY(-1px)}
-  .system-info{display:grid;grid-template-columns:1fr 1fr;gap:15px}
-  @media(max-width:768px){.system-info{grid-template-columns:1fr}}
-  .info-item{background:#252540;padding:15px;border-radius:8px}
-  .info-label{color:#888;font-size:0.85em;margin-bottom:5px}
-  .info-value{color:#fff;font-size:1.1em;font-weight:600}
+  .slot-num{cursor:pointer;user-select:none}
+  .slot-num:hover{color:#667eea}
+  .slot-num:active{color:#764ba2}
 </style>
 </head><body>
 <div class="container">
   <div class="header">
-    <h1>Merimac Video Ninja Bridge</h1>
-    <p class="subtitle">Live camera management dashboard</p>
+    <div class="system-compact" id="system-info-compact">
+      <div>CPU: <span id="cpu">-</span></div>
+      <div>RAM: <span id="ram">-</span></div>
+      <div>Temp: <span id="temp">-</span></div>
+      <div>Uptime: <span id="uptime">-</span></div>
+      <div>Disk: <span id="disk">-</span></div>
+    </div>
+    <div class="header-title">
+      <h1>Merimac Video Ninja Bridge</h1>
+      <p class="subtitle">Live camera management dashboard</p>
+    </div>
   </div>
   <div class="grid">
     <div class="card qr-card">
@@ -346,18 +356,6 @@ app.get("/control",async(req,res)=>{
       <table id="t"><tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>View</th><th>Action</th></tr>${rows}</table>
     </div>
   </div>
-  <div class="grid-full">
-    <div class="card">
-      <h3 style="margin-bottom:20px">System Information</h3>
-      <div class="system-info" id="system-info">
-        <div class="info-item"><div class="info-label">CPU Usage</div><div class="info-value">Loading...</div></div>
-        <div class="info-item"><div class="info-label">Memory</div><div class="info-value">Loading...</div></div>
-        <div class="info-item"><div class="info-label">Temperature</div><div class="info-value">Loading...</div></div>
-        <div class="info-item"><div class="info-label">Uptime</div><div class="info-value">Loading...</div></div>
-        <div class="info-item"><div class="info-label">Disk Usage</div><div class="info-value">Loading...</div></div>
-      </div>
-    </div>
-  </div>
 </div>
 <script src="/socket.io/socket.io.js"></script>
 <script>
@@ -388,6 +386,12 @@ async function applySettings(){
   }
 }
 
+function copyToClipboard(text){
+  navigator.clipboard.writeText(text).then(()=>{
+    // Show brief feedback (optional)
+  }).catch(err=>console.error('Copy failed:',err));
+}
+
 async function clearSlot(n){await fetch('/api/clear/'+n,{method:'POST'});refresh();}
 
 async function refresh(){
@@ -403,7 +407,7 @@ async function refresh(){
     const rowClass=s?'occupied':'';
     const disabled=s?'':'disabled';
     h+=\`<tr class="\${rowClass}">
-    <td><strong>\${i}</strong></td>
+    <td><strong class="slot-num" onclick="copyToClipboard('\${i}')" title="Click to copy slot number">\${i}</strong></td>
     <td>\${status}</td>
     <td class="stream-id">\${id}</td>
     <td><a href="/slot/\${i}" target="_blank" class="btn-link">View</a></td>
@@ -416,18 +420,11 @@ async function refresh(){
 async function updateSystemInfo(){
   try{
     const info=await fetch('/api/system').then(r=>r.json());
-    const items=[
-      {label:'CPU Usage',value:info.cpuUsage||'N/A'},
-      {label:'Memory',value:info.memPercent?info.memUsage+' ('+info.memPercent+')':info.memUsage||'N/A'},
-      {label:'Temperature',value:info.temperature||'N/A'},
-      {label:'Uptime',value:info.uptime||'N/A'},
-      {label:'Disk Usage',value:info.diskPercent?info.diskUsage+' ('+info.diskPercent+')':info.diskUsage||'N/A'}
-    ];
-    let html='';
-    items.forEach(item=>{
-      html+=\`<div class="info-item"><div class="info-label">\${item.label}</div><div class="info-value">\${item.value}</div></div>\`;
-    });
-    document.getElementById('system-info').innerHTML=html;
+    document.getElementById('cpu').textContent=info.cpuUsage||'N/A';
+    document.getElementById('ram').textContent=info.memPercent||'N/A';
+    document.getElementById('temp').textContent=info.temperature||'N/A';
+    document.getElementById('uptime').textContent=info.uptime||'N/A';
+    document.getElementById('disk').textContent=info.diskPercent||'N/A';
   }catch(e){
     console.error('Failed to fetch system info:',e);
   }
