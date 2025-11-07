@@ -8,6 +8,7 @@ const QRCode = require("qrcode");
 const session = require("express-session");
 const fs = require("fs");
 const path = require("path");
+const WebSocket = require("ws");
 
 const app = express();
 const server = http.createServer(app);
@@ -24,6 +25,7 @@ const GRACE_MS = 5_000;        // 5 second grace period on initial connection
 // Settings file path
 const SETTINGS_FILE = path.join(__dirname, 'bridge-settings.json');
 const ACTIVITY_LOG_FILE = path.join(__dirname, 'activity-log.json');
+const CAMERAS_FILE = path.join(__dirname, 'camera-control.json');
 
 // Default settings
 let SETTINGS = {
@@ -37,6 +39,10 @@ let SETTINGS = {
 
 // Activity log (in-memory with file backup)
 let ACTIVITY_LOG = [];
+
+// Camera control storage
+let CAMERAS = []; // Array of {id, name, ip, connected, lastSeen, settings}
+const cameraConnections = new Map(); // ip -> WebSocket connection
 
 // Login attempt tracking for rate limiting
 const loginAttempts = new Map(); // IP -> {count, lastAttempt, lockedUntil}
@@ -112,9 +118,33 @@ function logActivity(type, message, slotNumber = null) {
   io.emit('activity', entry);
 }
 
+// Load cameras from file
+function loadCameras() {
+  try {
+    if (fs.existsSync(CAMERAS_FILE)) {
+      const data = fs.readFileSync(CAMERAS_FILE, 'utf8');
+      CAMERAS = JSON.parse(data);
+      console.log(`Cameras loaded: ${CAMERAS.length} cameras`);
+    }
+  } catch (e) {
+    console.error('Error loading cameras:', e.message);
+  }
+}
+
+// Save cameras to file
+function saveCameras() {
+  try {
+    fs.writeFileSync(CAMERAS_FILE, JSON.stringify(CAMERAS, null, 2));
+    console.log('Cameras saved to file');
+  } catch (e) {
+    console.error('Error saving cameras:', e.message);
+  }
+}
+
 // Load settings on startup
 loadSettings();
 loadActivityLog();
+loadCameras();
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -448,6 +478,229 @@ app.get("/api/activity",requireAuth,(r,s)=>{
   s.json({logs});
 });
 
+// Camera Control API
+app.get("/api/cameras",requireAuth,(r,s)=>{
+  s.json({cameras: CAMERAS});
+});
+
+app.post("/api/cameras/scan",requireAuth,async(r,s)=>{
+  const {exec}=require("child_process");
+  const util=require("util");
+  const execAsync=util.promisify(exec);
+  const net=require("net");
+
+  try{
+    const foundCameras=[];
+
+    // Get all network interfaces
+    const os=require("os");
+    const interfaces=os.networkInterfaces();
+    const subnets=new Set();
+
+    // Extract all local network subnets
+    for(const ifname in interfaces){
+      for(const iface of interfaces[ifname]){
+        if(iface.family==='IPv4' && !iface.internal){
+          const parts=iface.address.split('.');
+          const subnet=parts[0]+'.'+parts[1]+'.'+parts[2];
+          subnets.add(subnet);
+        }
+      }
+    }
+
+    console.log('Scanning subnets:',Array.from(subnets));
+
+    // Scan each subnet for devices with port 8888 open
+    for(const subnet of subnets){
+      const promises=[];
+      for(let i=1;i<255;i++){
+        const ip=subnet+'.'+i;
+        promises.push(
+          new Promise((resolve)=>{
+            const socket=new net.Socket();
+            socket.setTimeout(1000);
+            socket.on('connect',()=>{
+              socket.destroy();
+              resolve({ip,open:true});
+            });
+            socket.on('timeout',()=>{
+              socket.destroy();
+              resolve({ip,open:false});
+            });
+            socket.on('error',()=>{
+              socket.destroy();
+              resolve({ip,open:false});
+            });
+            socket.connect(8888,ip);
+          })
+        );
+      }
+
+      const results=await Promise.all(promises);
+      for(const result of results){
+        if(result.open){
+          // Check if already in CAMERAS
+          const existing=CAMERAS.find(c=>c.ip===result.ip);
+          if(!existing){
+            foundCameras.push({
+              ip:result.ip,
+              name:'Camera '+result.ip,
+              autoDetected:true
+            });
+          }
+        }
+      }
+    }
+
+    console.log('Found cameras:',foundCameras);
+    s.json({cameras:foundCameras});
+  }catch(e){
+    console.error('Camera scan error:',e);
+    s.json({error:e.message,cameras:[]});
+  }
+});
+
+app.post("/api/cameras/add",requireAuth,(r,s)=>{
+  const {ip,name}=r.body;
+  if(!ip){
+    return s.json({ok:false,error:'IP address required'});
+  }
+
+  // Check if camera already exists
+  const existing=CAMERAS.find(c=>c.ip===ip);
+  if(existing){
+    return s.json({ok:false,error:'Camera already exists'});
+  }
+
+  const camera={
+    id:Date.now().toString(),
+    name:name||'Camera '+ip,
+    ip:ip,
+    connected:false,
+    lastSeen:null,
+    settings:{}
+  };
+
+  CAMERAS.push(camera);
+  saveCameras();
+  logActivity('system',`Camera added: ${camera.name} (${camera.ip})`);
+  io.emit('cameras',{cameras:CAMERAS});
+  s.json({ok:true,camera});
+});
+
+app.delete("/api/cameras/:id",requireAuth,(r,s)=>{
+  const id=r.params.id;
+  const index=CAMERAS.findIndex(c=>c.id===id);
+  if(index===-1){
+    return s.json({ok:false,error:'Camera not found'});
+  }
+
+  const camera=CAMERAS[index];
+
+  // Close WebSocket connection if exists
+  if(cameraConnections.has(camera.ip)){
+    const ws=cameraConnections.get(camera.ip);
+    ws.close();
+    cameraConnections.delete(camera.ip);
+  }
+
+  CAMERAS.splice(index,1);
+  saveCameras();
+  logActivity('system',`Camera removed: ${camera.name} (${camera.ip})`);
+  io.emit('cameras',{cameras:CAMERAS});
+  s.json({ok:true});
+});
+
+app.post("/api/cameras/:id/connect",requireAuth,(r,s)=>{
+  const id=r.params.id;
+  const camera=CAMERAS.find(c=>c.id===id);
+  if(!camera){
+    return s.json({ok:false,error:'Camera not found'});
+  }
+
+  // Check if already connected
+  if(cameraConnections.has(camera.ip)){
+    return s.json({ok:true,alreadyConnected:true});
+  }
+
+  try{
+    const ws=new WebSocket(`ws://${camera.ip}:8888`);
+
+    ws.on('open',()=>{
+      console.log(`Connected to camera ${camera.name} (${camera.ip})`);
+      camera.connected=true;
+      camera.lastSeen=new Date().toISOString();
+      cameraConnections.set(camera.ip,ws);
+      io.emit('cameras',{cameras:CAMERAS});
+      logActivity('system',`Connected to camera: ${camera.name} (${camera.ip})`);
+    });
+
+    ws.on('message',(data)=>{
+      try{
+        const msg=JSON.parse(data);
+        // Store camera settings when received
+        if(msg.messageType==='deviceConfiguration' || msg.content){
+          try{
+            const content=typeof msg.content==='string'?JSON.parse(msg.content):msg.content;
+            camera.settings=content;
+            io.emit('camera-update',{cameraId:camera.id,settings:content});
+          }catch(e){
+            console.error('Error parsing camera settings:',e);
+          }
+        }
+      }catch(e){
+        console.error('Error parsing WebSocket message:',e);
+      }
+    });
+
+    ws.on('close',()=>{
+      console.log(`Disconnected from camera ${camera.name} (${camera.ip})`);
+      camera.connected=false;
+      cameraConnections.delete(camera.ip);
+      io.emit('cameras',{cameras:CAMERAS});
+      logActivity('system',`Disconnected from camera: ${camera.name} (${camera.ip})`);
+    });
+
+    ws.on('error',(err)=>{
+      console.error(`Camera ${camera.name} WebSocket error:`,err.message);
+      camera.connected=false;
+      cameraConnections.delete(camera.ip);
+      io.emit('cameras',{cameras:CAMERAS});
+    });
+
+    s.json({ok:true});
+  }catch(e){
+    console.error('Error connecting to camera:',e);
+    s.json({ok:false,error:e.message});
+  }
+});
+
+app.post("/api/cameras/:id/command",requireAuth,(r,s)=>{
+  const id=r.params.id;
+  const camera=CAMERAS.find(c=>c.id===id);
+  if(!camera){
+    return s.json({ok:false,error:'Camera not found'});
+  }
+
+  const ws=cameraConnections.get(camera.ip);
+  if(!ws || ws.readyState!==WebSocket.OPEN){
+    return s.json({ok:false,error:'Camera not connected'});
+  }
+
+  try{
+    const command=r.body;
+    const message={
+      messageType:"setDeviceConfiguration",
+      content:JSON.stringify(command)
+    };
+    ws.send(JSON.stringify(message));
+    s.json({ok:true});
+  }catch(e){
+    console.error('Error sending command:',e);
+    s.json({ok:false,error:e.message});
+  }
+});
+
 app.get("/api/system",requireAuth,async(r,s)=>{
   const {exec}=require("child_process");
   const util=require("util");
@@ -774,6 +1027,7 @@ function dashboardLayout(pageName,content){
 <div class="sidebar">
   <div class="sidebar-title">Merimac Bridge</div>
   <a href="/control" class="nav-item ${pageName==='Control'?'active':''}">Control</a>
+  <a href="/camera-control" class="nav-item ${pageName==='Camera Control'?'active':''}">Camera Control</a>
   <a href="/network" class="nav-item ${pageName==='Network'?'active':''}">Network</a>
   <a href="/activity" class="nav-item ${pageName==='Activity'?'active':''}">Activity Log</a>
   <a href="/debug" class="nav-item ${pageName==='Debug'?'active':''}">Debug</a>
@@ -1587,6 +1841,484 @@ app.get("/activity",requireAuth,async(req,res)=>{
     </script>
   `;
   res.send(dashboardLayout('Activity',content));
+});
+
+// Camera Control page
+app.get("/camera-control",requireAuth,async(req,res)=>{
+  const content=`
+    <div class="header">
+      <div class="header-title">
+        <h1>Camera Control</h1>
+        <p class="subtitle">Control OBS Camera app via remote interface</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;gap:10px;flex-wrap:wrap">
+        <h3>Camera Management</h3>
+        <div style="display:flex;gap:10px">
+          <button class="btn-refresh" id="scan-btn" onclick="scanForCameras()">Auto-Scan Network</button>
+          <button class="btn-apply" onclick="showAddCameraForm()" style="width:auto;padding:8px 20px">+ Add Camera</button>
+        </div>
+      </div>
+
+      <div id="add-camera-form" style="display:none;margin-bottom:20px;padding:20px;background:#252540;border-radius:8px">
+        <h4 style="margin-bottom:15px">Add Camera Manually</h4>
+        <div style="display:flex;gap:15px;flex-wrap:wrap">
+          <div style="flex:1;min-width:200px">
+            <label style="display:block;margin-bottom:5px;color:#e0e0e0">Camera Name</label>
+            <input type="text" id="camera-name" placeholder="e.g. iPhone 1" style="width:100%;padding:10px;background:#1a1a2e;border:1px solid #667eea;color:#fff;border-radius:6px">
+          </div>
+          <div style="flex:1;min-width:200px">
+            <label style="display:block;margin-bottom:5px;color:#e0e0e0">IP Address</label>
+            <input type="text" id="camera-ip" placeholder="e.g. 192.168.4.10" style="width:100%;padding:10px;background:#1a1a2e;border:1px solid #667eea;color:#fff;border-radius:6px">
+          </div>
+          <div style="display:flex;align-items:flex-end;gap:10px">
+            <button class="btn-save" onclick="addCamera()" style="padding:10px 24px;margin:0">Add</button>
+            <button class="btn-clear" onclick="hideAddCameraForm()" style="padding:10px 24px;margin:0">Cancel</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="scan-results" style="display:none;margin-bottom:20px;padding:15px;background:#1e1e35;border-radius:8px;border-left:3px solid #10b981">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <strong>Scan Results:</strong> <span id="scan-count">0</span> cameras found
+          </div>
+          <button onclick="addAllScannedCameras()" class="btn-apply" style="padding:6px 16px;margin:0;width:auto">Add All</button>
+        </div>
+        <div id="scan-list" style="margin-top:10px"></div>
+      </div>
+    </div>
+
+    <div id="cameras-container" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(450px,1fr));gap:20px">
+      <div style="text-align:center;padding:40px;color:#888;grid-column:1/-1">
+        No cameras added yet. Click "Auto-Scan Network" or "+ Add Camera" to get started.
+      </div>
+    </div>
+
+    <style>
+    .camera-card{background:#1a1a2e;border-radius:12px;padding:20px;box-shadow:0 4px 20px rgba(0,0,0,0.3)}
+    .camera-card.connected{border:2px solid #10b981}
+    .camera-card.disconnected{border:2px solid #374151}
+    .camera-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;padding-bottom:15px;border-bottom:1px solid #2a2a3e}
+    .camera-title{font-size:1.2em;font-weight:600;color:#fff}
+    .camera-status{font-size:0.85em;padding:4px 12px;border-radius:12px;font-weight:600}
+    .camera-status.connected{background:#10b981;color:#fff}
+    .camera-status.disconnected{background:#374151;color:#9ca3af}
+    .camera-controls{display:flex;flex-direction:column;gap:15px}
+    .control-group{background:#252540;padding:15px;border-radius:8px}
+    .control-group h4{margin-bottom:10px;color:#667eea;font-size:0.95em}
+    .control-row{display:flex;gap:10px;align-items:center;margin-bottom:10px}
+    .control-row:last-child{margin-bottom:0}
+    .control-label{flex:0 0 120px;color:#e0e0e0;font-size:0.9em}
+    .control-input{flex:1;padding:8px;background:#1a1a2e;border:1px solid #667eea;color:#fff;border-radius:6px;font-size:0.9em}
+    .control-input:focus{outline:none;border-color:#764ba2}
+    .btn-mini{padding:6px 12px;font-size:0.85em;border-radius:6px;border:none;cursor:pointer;font-weight:500;transition:all 0.2s}
+    .btn-connect{background:#10b981;color:#fff}
+    .btn-connect:hover{background:#059669}
+    .btn-disconnect{background:#f59e0b;color:#fff}
+    .btn-disconnect:hover{background:#d97706}
+    .btn-remove{background:#ef4444;color:#fff}
+    .btn-remove:hover{background:#dc2626}
+    .toggle-btn{background:#667eea;color:#fff;padding:8px 16px;border-radius:6px;border:none;cursor:pointer;font-weight:500;transition:all 0.2s}
+    .toggle-btn.active{background:#10b981}
+    .toggle-btn:hover{opacity:0.9}
+    </style>
+
+    <script>
+    const socket=io();
+    let cameras=[];
+    let scannedCameras=[];
+
+    socket.on('cameras',(data)=>{
+      cameras=data.cameras;
+      renderCameras();
+    });
+
+    socket.on('camera-update',(data)=>{
+      const camera=cameras.find(c=>c.id===data.cameraId);
+      if(camera){
+        camera.settings=data.settings;
+        renderCameras();
+      }
+    });
+
+    async function loadCameras(){
+      try{
+        const data=await fetch('/api/cameras').then(r=>r.json());
+        cameras=data.cameras;
+        renderCameras();
+      }catch(e){
+        console.error('Error loading cameras:',e);
+        showToast('Error loading cameras','error');
+      }
+    }
+
+    function renderCameras(){
+      const container=document.getElementById('cameras-container');
+      if(cameras.length===0){
+        container.innerHTML='<div style="text-align:center;padding:40px;color:#888;grid-column:1/-1">No cameras added yet. Click "Auto-Scan Network" or "+ Add Camera" to get started.</div>';
+        return;
+      }
+
+      let html='';
+      cameras.forEach(camera=>{
+        const connected=camera.connected;
+        const statusClass=connected?'connected':'disconnected';
+        const statusText=connected?'Connected':'Disconnected';
+
+        html+=\`<div class="camera-card \${statusClass}">
+          <div class="camera-header">
+            <div class="camera-title">\${camera.name}</div>
+            <span class="camera-status \${statusClass}">\${statusText}</span>
+          </div>
+          <div style="margin-bottom:15px;color:#888;font-size:0.9em">
+            <div>IP: \${camera.ip}</div>
+            \${camera.lastSeen?'<div style="font-size:0.85em">Last seen: '+new Date(camera.lastSeen).toLocaleString()+'</div>':''}
+          </div>
+          <div style="display:flex;gap:10px;margin-bottom:15px">
+            \${!connected?
+              '<button class="btn-mini btn-connect" onclick="connectCamera(\\''+camera.id+'\\')">Connect</button>':
+              '<button class="btn-mini btn-disconnect" onclick="disconnectCamera(\\''+camera.id+'\\')">Disconnect</button>'
+            }
+            <button class="btn-mini btn-remove" onclick="removeCamera('\${camera.id}')">Remove</button>
+          </div>
+          \${connected && camera.settings?renderCameraControls(camera):'<div style="text-align:center;padding:20px;color:#888">Connect to view controls</div>'}
+        </div>\`;
+      });
+
+      container.innerHTML=html;
+    }
+
+    function renderCameraControls(camera){
+      const s=camera.settings;
+      if(!s)return'';
+
+      return \`
+        <div class="camera-controls">
+          <div class="control-group">
+            <h4>Camera & Quality</h4>
+            <div class="control-row">
+              <span class="control-label">Camera:</span>
+              <select class="control-input" onchange="updateSetting('\${camera.id}','selectedCamera',this.value)">
+                <option value="front" \${s.selectedCamera==='front'?'selected':''}>Front</option>
+                <option value="rear" \${s.selectedCamera==='rear'?'selected':''}>Rear</option>
+                <option value="ultrawide" \${s.selectedCamera==='ultrawide'?'selected':''}>Ultra Wide</option>
+                <option value="telephoto" \${s.selectedCamera==='telephoto'?'selected':''}>Telephoto</option>
+              </select>
+            </div>
+            <div class="control-row">
+              <span class="control-label">Resolution:</span>
+              <select class="control-input" onchange="updateSetting('\${camera.id}','resolution',this.value)">
+                <option value="1920x1080" \${s.resolution==='1920x1080'?'selected':''}>1920x1080</option>
+                <option value="1280x720" \${s.resolution==='1280x720'?'selected':''}>1280x720</option>
+                <option value="3840x2160" \${s.resolution==='3840x2160'?'selected':''}>3840x2160 (4K)</option>
+              </select>
+            </div>
+            <div class="control-row">
+              <span class="control-label">Framerate:</span>
+              <select class="control-input" onchange="updateSetting('\${camera.id}','framerate',this.value)">
+                <option value="24" \${s.framerate==='24'?'selected':''}>24 fps</option>
+                <option value="30" \${s.framerate==='30'?'selected':''}>30 fps</option>
+                <option value="60" \${s.framerate==='60'?'selected':''}>60 fps</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <h4>Zoom & Torch</h4>
+            <div class="control-row">
+              <span class="control-label">Zoom:</span>
+              <input type="range" class="control-input" min="1" max="10" step="0.1" value="\${s.zoomLevel||1}"
+                oninput="updateSetting('\${camera.id}','zoomLevel',parseFloat(this.value))">
+              <span style="min-width:40px;color:#888">\${(s.zoomLevel||1).toFixed(1)}x</span>
+            </div>
+            <div class="control-row">
+              <span class="control-label">Torch:</span>
+              <button class="toggle-btn \${s.isTorchEnabled?'active':''}"
+                onclick="updateSetting('\${camera.id}','isTorchEnabled',\${!s.isTorchEnabled})">
+                \${s.isTorchEnabled?'ON':'OFF'}
+              </button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <h4>White Balance</h4>
+            <div class="control-row">
+              <span class="control-label">Mode:</span>
+              <button class="toggle-btn \${s.isAutomaticWhiteBalanceModeEnabled?'active':''}"
+                onclick="updateSetting('\${camera.id}','isAutomaticWhiteBalanceModeEnabled',\${!s.isAutomaticWhiteBalanceModeEnabled})">
+                \${s.isAutomaticWhiteBalanceModeEnabled?'Auto':'Manual'}
+              </button>
+            </div>
+            \${!s.isAutomaticWhiteBalanceModeEnabled?\`
+            <div class="control-row">
+              <span class="control-label">Temperature:</span>
+              <input type="range" class="control-input" min="1800" max="8000" step="100" value="\${s.temperature||5000}"
+                oninput="updateSetting('\${camera.id}','temperature',parseInt(this.value))">
+              <span style="min-width:50px;color:#888">\${s.temperature||5000}K</span>
+            </div>\`:''}
+          </div>
+
+          <div class="control-group">
+            <h4>Focus</h4>
+            <div class="control-row">
+              <span class="control-label">Mode:</span>
+              <select class="control-input" onchange="updateFocusMode('\${camera.id}',this.value)">
+                <option value="auto" \${s.focusConfiguration?.focusMode==='auto'?'selected':''}>Auto</option>
+                <option value="manual" \${s.focusConfiguration?.focusMode==='manual'?'selected':''}>Manual</option>
+              </select>
+            </div>
+            \${s.focusConfiguration?.focusMode==='manual'?\`
+            <div class="control-row">
+              <span class="control-label">Position:</span>
+              <input type="range" class="control-input" min="0" max="1" step="0.01" value="\${s.focusConfiguration?.lensPosition||0.5}"
+                oninput="updateFocusPosition('\${camera.id}',parseFloat(this.value))">
+              <span style="min-width:50px;color:#888">\${((s.focusConfiguration?.lensPosition||0.5)*100).toFixed(0)}%</span>
+            </div>\`:''}
+          </div>
+
+          \${s.batteryState?\`
+          <div style="padding:10px;background:#252540;border-radius:8px;text-align:center;color:#888;font-size:0.9em">
+            🔋 Battery: \${(s.batteryState.level*100).toFixed(0)}%
+          </div>\`:''}
+        </div>
+      \`;
+    }
+
+    async function scanForCameras(){
+      const btn=document.getElementById('scan-btn');
+      btn.disabled=true;
+      btn.textContent='Scanning...';
+
+      try{
+        const data=await fetch('/api/cameras/scan',{method:'POST'}).then(r=>r.json());
+        scannedCameras=data.cameras||[];
+
+        if(scannedCameras.length===0){
+          showToast('No cameras found on the network','info');
+          document.getElementById('scan-results').style.display='none';
+        }else{
+          document.getElementById('scan-count').textContent=scannedCameras.length;
+          let html='';
+          scannedCameras.forEach((cam,idx)=>{
+            html+=\`<div style="padding:8px 0;border-top:1px solid #2a2a3e">
+              <strong>\${cam.ip}</strong>
+              <button class="btn-mini btn-connect" onclick="addScannedCamera(\${idx})" style="margin-left:10px">Add</button>
+            </div>\`;
+          });
+          document.getElementById('scan-list').innerHTML=html;
+          document.getElementById('scan-results').style.display='block';
+          showToast(\`Found \${scannedCameras.length} camera(s)\`,'success');
+        }
+      }catch(e){
+        console.error('Scan error:',e);
+        showToast('Error scanning network','error');
+      }finally{
+        btn.disabled=false;
+        btn.textContent='Auto-Scan Network';
+      }
+    }
+
+    async function addScannedCamera(index){
+      const cam=scannedCameras[index];
+      try{
+        const res=await fetch('/api/cameras/add',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({ip:cam.ip,name:cam.name})
+        });
+        const data=await res.json();
+        if(data.ok){
+          showToast(\`Camera added: \${cam.ip}\`,'success');
+          scannedCameras.splice(index,1);
+          if(scannedCameras.length===0){
+            document.getElementById('scan-results').style.display='none';
+          }
+          loadCameras();
+        }else{
+          showToast(data.error||'Failed to add camera','error');
+        }
+      }catch(e){
+        console.error('Error adding camera:',e);
+        showToast('Error adding camera','error');
+      }
+    }
+
+    async function addAllScannedCameras(){
+      for(const cam of scannedCameras){
+        try{
+          await fetch('/api/cameras/add',{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({ip:cam.ip,name:cam.name})
+          });
+        }catch(e){
+          console.error('Error adding camera:',e);
+        }
+      }
+      showToast(\`Added \${scannedCameras.length} camera(s)\`,'success');
+      scannedCameras=[];
+      document.getElementById('scan-results').style.display='none';
+      loadCameras();
+    }
+
+    function showAddCameraForm(){
+      document.getElementById('add-camera-form').style.display='block';
+      document.getElementById('camera-name').focus();
+    }
+
+    function hideAddCameraForm(){
+      document.getElementById('add-camera-form').style.display='none';
+      document.getElementById('camera-name').value='';
+      document.getElementById('camera-ip').value='';
+    }
+
+    async function addCamera(){
+      const name=document.getElementById('camera-name').value;
+      const ip=document.getElementById('camera-ip').value;
+
+      if(!ip){
+        showToast('IP address is required','error');
+        return;
+      }
+
+      try{
+        const res=await fetch('/api/cameras/add',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({ip,name})
+        });
+        const data=await res.json();
+        if(data.ok){
+          showToast('Camera added successfully','success');
+          hideAddCameraForm();
+          loadCameras();
+        }else{
+          showToast(data.error||'Failed to add camera','error');
+        }
+      }catch(e){
+        console.error('Error adding camera:',e);
+        showToast('Error adding camera','error');
+      }
+    }
+
+    async function connectCamera(id){
+      try{
+        const res=await fetch(\`/api/cameras/\${id}/connect\`,{method:'POST'});
+        const data=await res.json();
+        if(data.ok){
+          showToast('Connecting to camera...','info');
+        }else{
+          showToast(data.error||'Failed to connect','error');
+        }
+      }catch(e){
+        console.error('Error connecting:',e);
+        showToast('Error connecting to camera','error');
+      }
+    }
+
+    async function disconnectCamera(id){
+      const camera=cameras.find(c=>c.id===id);
+      if(!camera)return;
+      // Note: Closing from server side would require additional API endpoint
+      showToast('Disconnect camera by closing the app','info');
+    }
+
+    async function removeCamera(id){
+      if(!confirm('Remove this camera?'))return;
+      try{
+        const res=await fetch(\`/api/cameras/\${id}\`,{method:'DELETE'});
+        const data=await res.json();
+        if(data.ok){
+          showToast('Camera removed','success');
+          loadCameras();
+        }else{
+          showToast(data.error||'Failed to remove camera','error');
+        }
+      }catch(e){
+        console.error('Error removing camera:',e);
+        showToast('Error removing camera','error');
+      }
+    }
+
+    async function updateSetting(cameraId,key,value){
+      const camera=cameras.find(c=>c.id===cameraId);
+      if(!camera||!camera.settings)return;
+
+      const newSettings={...camera.settings,[key]:value};
+
+      try{
+        await fetch(\`/api/cameras/\${cameraId}/command\`,{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(newSettings)
+        });
+        camera.settings[key]=value;
+        renderCameras();
+      }catch(e){
+        console.error('Error updating setting:',e);
+        showToast('Error updating setting','error');
+      }
+    }
+
+    async function updateFocusMode(cameraId,mode){
+      const camera=cameras.find(c=>c.id===cameraId);
+      if(!camera||!camera.settings)return;
+
+      const newSettings={
+        ...camera.settings,
+        focusConfiguration:{
+          ...(camera.settings.focusConfiguration||{}),
+          focusMode:mode
+        }
+      };
+
+      try{
+        await fetch(\`/api/cameras/\${cameraId}/command\`,{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(newSettings)
+        });
+        camera.settings.focusConfiguration=newSettings.focusConfiguration;
+        renderCameras();
+      }catch(e){
+        console.error('Error updating focus mode:',e);
+        showToast('Error updating focus mode','error');
+      }
+    }
+
+    async function updateFocusPosition(cameraId,position){
+      const camera=cameras.find(c=>c.id===cameraId);
+      if(!camera||!camera.settings)return;
+
+      const newSettings={
+        ...camera.settings,
+        focusConfiguration:{
+          ...(camera.settings.focusConfiguration||{}),
+          lensPosition:position
+        }
+      };
+
+      try{
+        await fetch(\`/api/cameras/\${cameraId}/command\`,{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(newSettings)
+        });
+        camera.settings.focusConfiguration=newSettings.focusConfiguration;
+        renderCameras();
+      }catch(e){
+        console.error('Error updating focus position:',e);
+        showToast('Error updating focus position','error');
+      }
+    }
+
+    loadCameras();
+    </script>
+  `;
+  res.send(dashboardLayout('Camera Control',content));
 });
 
 setInterval(()=>{
