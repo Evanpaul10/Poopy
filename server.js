@@ -20,7 +20,7 @@ const INACTIVITY_MS = 8_000;  // Clear inactive slots after 8 seconds
 const GRACE_MS = 5_000;        // 5 second grace period on initial connection
 
 // Authentication credentials
-const AUTH_USERNAME = "Admin";
+const AUTH_USERNAME = "admin";
 const AUTH_PASSWORD = "Cameldog99#";
 const RESET_PIN = "898989";
 
@@ -177,7 +177,7 @@ app.get("/forgot-password", (req, res) => {
   <h1>🔑 Reset Password</h1>
   <p class="subtitle">Enter PIN to view credentials</p>
   ${error ? '<div class="error">Invalid PIN</div>' : ''}
-  ${success ? `<div class="success">Username: <strong>Admin</strong><br>Password: <strong>Cameldog99#</strong></div>` : ''}
+  ${success ? `<div class="success">Username: <strong>admin</strong><br>Password: <strong>Cameldog99#</strong></div>` : ''}
   ${!success ? `<form method="POST" action="/forgot-password">
     <div class="info">Enter the 6-digit PIN to retrieve your login credentials</div>
     <div class="form-group">
