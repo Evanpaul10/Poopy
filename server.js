@@ -134,7 +134,7 @@ const SLOTS = {};
 for(let i=1;i<=50;i++)SLOTS[i]=null;
 const deviceIndex = new Map();
 
-let MAX_SLOTS = 5; // Default to 5, configurable via API
+let MAX_SLOTS = SETTINGS.maxSlots; // Load from settings
 
 // Authentication middleware
 function requireAuth(req, res, next) {
@@ -167,6 +167,14 @@ app.get("/login", (req, res) => {
     return res.redirect('/control');
   }
   const error = req.query.error;
+  const minutes = req.query.minutes || 15;
+  let errorMsg = '';
+  if (error === 'locked') {
+    errorMsg = `Too many failed attempts. Account locked for ${minutes} minutes. Use Forgot Password to recover.`;
+  } else if (error === '1') {
+    errorMsg = 'Invalid username or password';
+  }
+
   res.send(`<!doctype html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Login - Merimac Bridge</title>
@@ -198,7 +206,7 @@ app.get("/login", (req, res) => {
 <div class="login-container">
   <h1>🔒 Merimac Bridge</h1>
   <p class="subtitle">Admin Login</p>
-  ${error ? '<div class="error">Invalid username or password</div>' : ''}
+  ${errorMsg ? `<div class="error">${errorMsg}</div>` : ''}
   <form method="POST" action="/login">
     <div class="form-group">
       <label for="username">Username</label>
@@ -217,14 +225,41 @@ app.get("/login", (req, res) => {
 </body></html>`);
 });
 
-// Login POST
+// Login POST with rate limiting
 app.post("/login", (req, res) => {
+  const ip = req.ip || req.connection.remoteAddress;
+  const now = Date.now();
+
+  // Check if IP is locked out
+  const attempt = loginAttempts.get(ip);
+  if (attempt && attempt.lockedUntil && now < attempt.lockedUntil) {
+    const remainingMin = Math.ceil((attempt.lockedUntil - now) / 60000);
+    return res.redirect(`/login?error=locked&minutes=${remainingMin}`);
+  }
+
   const { username, password } = req.body;
-  if (username === AUTH_USERNAME && password === AUTH_PASSWORD) {
+  if (username === SETTINGS.username && password === SETTINGS.password) {
+    // Successful login - clear attempts
+    loginAttempts.delete(ip);
     req.session.authenticated = true;
     req.session.username = username;
+    logActivity('system', `User ${username} logged in from ${ip}`);
     res.redirect('/control');
   } else {
+    // Failed login - track attempt
+    if (!attempt) {
+      loginAttempts.set(ip, { count: 1, lastAttempt: now });
+    } else {
+      attempt.count++;
+      attempt.lastAttempt = now;
+
+      // Lock after 5 failed attempts for 15 minutes
+      if (attempt.count >= 5) {
+        attempt.lockedUntil = now + (15 * 60 * 1000);
+        logActivity('system', `Login locked for IP ${ip} after 5 failed attempts`);
+        return res.redirect('/login?error=locked&minutes=15');
+      }
+    }
     res.redirect('/login?error=1');
   }
 });
@@ -239,6 +274,8 @@ app.get("/logout", (req, res) => {
 app.get("/forgot-password", (req, res) => {
   const error = req.query.error;
   const success = req.query.success;
+  const username = req.query.u || '';
+  const password = req.query.p || '';
   res.send(`<!doctype html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Reset Password - Merimac Bridge</title>
@@ -274,7 +311,7 @@ app.get("/forgot-password", (req, res) => {
   <h1>🔑 Reset Password</h1>
   <p class="subtitle">Enter PIN to view credentials</p>
   ${error ? '<div class="error">Invalid PIN</div>' : ''}
-  ${success ? `<div class="success">Username: <strong>admin</strong><br>Password: <strong>Cameldog99#</strong></div>` : ''}
+  ${success ? `<div class="success">Username: <strong>${username}</strong><br>Password: <strong>${password}</strong></div>` : ''}
   ${!success ? `<form method="POST" action="/forgot-password">
     <div class="info">Enter the 6-digit PIN to retrieve your login credentials</div>
     <div class="form-group">
@@ -293,8 +330,8 @@ app.get("/forgot-password", (req, res) => {
 // Forgot password POST
 app.post("/forgot-password", (req, res) => {
   const { pin } = req.body;
-  if (pin === RESET_PIN) {
-    res.redirect('/forgot-password?success=1');
+  if (pin === SETTINGS.resetPin) {
+    res.redirect('/forgot-password?success=1&u=' + encodeURIComponent(SETTINGS.username) + '&p=' + encodeURIComponent(SETTINGS.password));
   } else {
     res.redirect('/forgot-password?error=1');
   }
@@ -305,6 +342,9 @@ app.post("/api/config",requireAuth,(r,s)=>{
   const {maxSlots}=r.body||{};
   if(maxSlots&&maxSlots>=1&&maxSlots<=50){
     MAX_SLOTS=maxSlots;
+    SETTINGS.maxSlots=maxSlots;
+    saveSettings();
+    logActivity('system', `Max slots changed to ${maxSlots}`);
     s.json({ok:true,maxSlots:MAX_SLOTS});
   }else{
     s.json({ok:false,error:"maxSlots must be between 1 and 50"});
@@ -313,7 +353,9 @@ app.post("/api/config",requireAuth,(r,s)=>{
 app.post("/api/claim",(r,s)=>{
   const {streamId,label}=r.body||{};
   if(!streamId)return s.json({ok:false});
-  const n=claim(streamId,label); if(!n)return s.json({ok:false,error:"full"});
+  const n=claim(streamId,label);
+  if(!n)return s.json({ok:false,error:"full"});
+  logActivity('join', `Camera joined slot ${n}`, n);
   io.emit("state",{slots:SLOTS});
   s.json({ok:true,slot:n});
 });
@@ -325,12 +367,86 @@ app.post("/api/heartbeat",(r,s)=>{
 });
 app.post("/api/leave",(r,s)=>{
   const id=(r.body?.streamId||"").replace(/[^a-zA-Z0-9]/g,"");
-  const c=clearById(id); if(c)io.emit("state",{slots:SLOTS}); s.json({ok:!!c});
+  const n=deviceIndex.get(id);
+  const c=clearById(id);
+  if(c){
+    logActivity('leave', `Camera left slot ${n}`, n);
+    io.emit("state",{slots:SLOTS});
+  }
+  s.json({ok:!!c});
 });
 app.post("/api/clear/:n",requireAuth,(r,s)=>{
-  const n=+r.params.n; clearSlot(n); io.emit("state",{slots:SLOTS}); s.json({ok:true});
+  const n=+r.params.n;
+  if(SLOTS[n]){
+    clearSlot(n);
+    logActivity('clear', `Slot ${n} cleared manually`, n);
+    io.emit("state",{slots:SLOTS});
+  }
+  s.json({ok:true});
 });
 app.get("/health",(r,s)=>s.json({ok:true,active:Object.values(SLOTS).filter(Boolean).length}));
+
+// Settings API
+app.get("/api/settings",requireAuth,(r,s)=>{
+  s.json({
+    bitrate: SETTINGS.bitrate,
+    networkRefreshInterval: SETTINGS.networkRefreshInterval
+  });
+});
+
+app.post("/api/settings",requireAuth,(r,s)=>{
+  const {bitrate, networkRefreshInterval, username, password, resetPin}=r.body||{};
+
+  // Update bitrate
+  if(bitrate && bitrate >= 500 && bitrate <= 10000){
+    SETTINGS.bitrate = bitrate;
+  }
+
+  // Update network refresh interval
+  if(networkRefreshInterval && networkRefreshInterval >= 1 && networkRefreshInterval <= 60){
+    SETTINGS.networkRefreshInterval = networkRefreshInterval;
+  }
+
+  // Update credentials
+  if(username && username.length >= 3){
+    SETTINGS.username = username;
+    logActivity('system', `Username changed to ${username}`);
+  }
+
+  if(password && password.length >= 6){
+    SETTINGS.password = password;
+    logActivity('system', 'Password changed');
+  }
+
+  if(resetPin && /^\d{6}$/.test(resetPin)){
+    SETTINGS.resetPin = resetPin;
+    logActivity('system', 'Reset PIN changed');
+  }
+
+  saveSettings();
+  s.json({ok:true, settings: {bitrate: SETTINGS.bitrate, networkRefreshInterval: SETTINGS.networkRefreshInterval}});
+});
+
+// Clear all slots API
+app.post("/api/clear-all",requireAuth,(r,s)=>{
+  let clearedCount = 0;
+  for(let i=1; i<=MAX_SLOTS; i++){
+    if(SLOTS[i]){
+      clearSlot(i);
+      clearedCount++;
+    }
+  }
+  logActivity('clear', `All slots cleared (${clearedCount} cameras disconnected)`);
+  io.emit("state",{slots:SLOTS});
+  s.json({ok:true, cleared: clearedCount});
+});
+
+// Activity log API
+app.get("/api/activity",requireAuth,(r,s)=>{
+  const limit = parseInt(r.query.limit) || 100;
+  const logs = ACTIVITY_LOG.slice(-limit).reverse();
+  s.json({logs});
+});
 
 app.get("/api/system",requireAuth,async(r,s)=>{
   const {exec}=require("child_process");
@@ -629,14 +745,40 @@ function dashboardLayout(pageName,content){
   .guide-section p{line-height:1.8;margin-bottom:10px}
   .guide-section ol{margin-left:20px;line-height:2}
   .guide-section code{background:#252540;padding:2px 8px;border-radius:4px;color:#10b981}
+  .toast{position:fixed;top:20px;right:20px;background:#1a1a2e;color:#fff;padding:15px 25px;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,0.5);z-index:9999;min-width:250px;animation:slideIn 0.3s ease}
+  .toast.success{border-left:4px solid #10b981}
+  .toast.error{border-left:4px solid #ef4444}
+  .toast.info{border-left:4px solid #667eea}
+  @keyframes slideIn{from{transform:translateX(400px);opacity:0}to{transform:translateX(0);opacity:1}}
+  @keyframes slideOut{from{transform:translateX(0);opacity:1}to{transform:translateX(400px);opacity:0}}
+  .toast.hiding{animation:slideOut 0.3s ease}
+  .form-group{margin-bottom:20px}
+  .form-group label{display:block;margin-bottom:8px;color:#e0e0e0;font-weight:500}
+  .form-group input,.form-group select{width:100%;padding:12px 16px;background:#252540;border:2px solid #667eea;color:#fff;border-radius:8px;font-size:1em;transition:all 0.2s}
+  .form-group input:focus,.form-group select:focus{outline:none;border-color:#764ba2}
+  .form-group small{display:block;margin-top:5px;color:#888;font-size:0.9em}
+  .btn-save{background:#10b981;color:#fff;border:none;padding:12px 30px;border-radius:8px;cursor:pointer;font-weight:600;transition:all 0.2s;font-size:1em}
+  .btn-save:hover{background:#059669;transform:translateY(-1px)}
+  .btn-clear-all{background:#ef4444;color:#fff;border:none;padding:10px 24px;border-radius:8px;cursor:pointer;font-weight:600;transition:all 0.2s}
+  .btn-clear-all:hover{background:#dc2626;transform:translateY(-1px)}
+  .activity-entry{padding:12px;border-left:3px solid #667eea;background:#1e1e35;margin-bottom:10px;border-radius:4px}
+  .activity-entry.join{border-left-color:#10b981}
+  .activity-entry.leave{border-left-color:#f59e0b}
+  .activity-entry.clear{border-left-color:#ef4444}
+  .activity-entry.system{border-left-color:#667eea}
+  .activity-time{font-size:0.85em;color:#888;margin-bottom:5px}
+  .activity-message{color:#e0e0e0}
+  .duration{font-size:0.85em;color:#888;margin-left:10px}
 </style>
 </head><body>
 <div class="sidebar">
   <div class="sidebar-title">Merimac Bridge</div>
   <a href="/control" class="nav-item ${pageName==='Control'?'active':''}">Control</a>
   <a href="/network" class="nav-item ${pageName==='Network'?'active':''}">Network</a>
+  <a href="/activity" class="nav-item ${pageName==='Activity'?'active':''}">Activity Log</a>
   <a href="/debug" class="nav-item ${pageName==='Debug'?'active':''}">Debug</a>
   <a href="/guide" class="nav-item ${pageName==='Guide'?'active':''}">Guide</a>
+  <a href="/settings" class="nav-item ${pageName==='Settings'?'active':''}">Settings</a>
   <div style="margin-top:auto;padding-top:20px;border-top:1px solid #2a2a3e">
     <a href="/logout" class="nav-item" style="color:#ef4444">Logout</a>
   </div>
@@ -646,6 +788,19 @@ function dashboardLayout(pageName,content){
     ${content}
   </div>
 </div>
+<script>
+// Toast notification system
+function showToast(message, type = 'info') {
+  const toast = document.createElement('div');
+  toast.className = \`toast \${type}\`;
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => {
+    toast.classList.add('hiding');
+    setTimeout(() => toast.remove(), 300);
+  }, 3000);
+}
+</script>
 </body></html>`;
 }
 
@@ -690,7 +845,7 @@ document.getElementById("go").onclick=async()=>{
   const j=await r.json(); if(!j.ok){w.close();return alert("All slots full");}
   const n=j.slot;
   w.location="${VDO}/?push="+encodeURIComponent(streamId)
-             +"&label=cam"+n+"&bitrate=2500&codec=h264&autostart&webcam&muted";
+             +"&label=cam"+n+"&bitrate=${SETTINGS.bitrate}&codec=h264&autostart&webcam&muted";
   document.getElementById("msg").innerHTML='<div class="status">✅ Connected as Camera '+n+'</div><br>Keep this page open during the show';
 };
 </script></body></html>`);
@@ -768,11 +923,13 @@ app.get("/control",requireAuth,async(req,res)=>{
     const s=SLOTS[i];
     const status=s?'<span class="badge active">Active</span>':'<span class="badge empty">Empty</span>';
     const id=s?s.streamId:'-';
+    const duration=s?Math.floor((now()-s.since)/1000)+'s':'-';
     const slotUrl=`${PUBLIC_HOST}/slot/${i}`;
     rows.push(`<tr class="${s?'occupied':''}">
     <td><strong>${i}</strong></td>
     <td>${status}</td>
     <td class="stream-id">${id}</td>
+    <td class="duration">${duration}</td>
     <td><a href="/slot/${i}" target="_blank" class="btn-link">View</a> <button onclick="copySlotUrl('${slotUrl}')" class="btn-copy">Copy Link</button></td>
     <td><button onclick="clearSlot(${i})" class="btn-clear" ${!s?'disabled':''}>Clear</button></td></tr>`);
   }
@@ -820,8 +977,11 @@ app.get("/control",requireAuth,async(req,res)=>{
         </div>
       </div>
       <div class="card">
-        <h3 style="margin-bottom:15px">Camera Slots</h3>
-        <table id="t"><tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>Slot Link</th><th>Action</th></tr>${rowsHtml}</table>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px">
+          <h3>Camera Slots</h3>
+          <button class="btn-clear-all" onclick="clearAllSlots()">Clear All Slots</button>
+        </div>
+        <table id="t"><tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>Duration</th><th>Slot Link</th><th>Action</th></tr>${rowsHtml}</table>
       </div>
     </div>
     <script>
@@ -846,7 +1006,10 @@ app.get("/control",requireAuth,async(req,res)=>{
 
     async function applySettings(){
       const total=parseInt(document.getElementById('total-slots-input').value);
-      if(total<1||total>50){alert('Total slots must be between 1 and 50');return;}
+      if(total<1||total>50){
+        showToast('Total slots must be between 1 and 50', 'error');
+        return;
+      }
       const res=await fetch('/api/config',{
         method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -856,32 +1019,54 @@ app.get("/control",requireAuth,async(req,res)=>{
       if(j.ok){
         maxSlots=j.maxSlots;
         document.getElementById('total-slots').textContent=maxSlots;
+        showToast(\`Slots updated to \${maxSlots}\`, 'success');
         refresh();
       }else{
-        alert(j.error||'Failed to update settings');
+        showToast(j.error||'Failed to update settings', 'error');
       }
     }
 
     function copySlotUrl(url){
       navigator.clipboard.writeText(url).then(()=>{
-        // Could add visual feedback here
-      }).catch(err=>console.error('Copy failed:',err));
+        showToast('Link copied to clipboard', 'success');
+      }).catch(err=>{
+        console.error('Copy failed:',err);
+        showToast('Failed to copy link', 'error');
+      });
     }
 
-    async function clearSlot(n){await fetch('/api/clear/'+n,{method:'POST'});refresh();}
+    async function clearSlot(n){
+      await fetch('/api/clear/'+n,{method:'POST'});
+      showToast(\`Slot \${n} cleared\`, 'info');
+      refresh();
+    }
+
+    async function clearAllSlots(){
+      if(!confirm('Are you sure you want to clear all active slots?'))return;
+      const res=await fetch('/api/clear-all',{method:'POST'});
+      const data=await res.json();
+      if(data.ok){
+        showToast(\`Cleared \${data.cleared} slot(s)\`, 'success');
+        refresh();
+      }else{
+        showToast('Failed to clear slots', 'error');
+      }
+    }
 
     async function refresh(){
       try{
         console.log('Refreshing slots...');
         const j=await fetch('/api/state').then(r=>r.json());
         maxSlots=j.maxSlots||maxSlots;
-        let h='<tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>Slot Link</th><th>Action</th></tr>';
+        let h='<tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>Duration</th><th>Slot Link</th><th>Action</th></tr>';
         let activeCount=0;
+        const now=Date.now();
         for(let i=1;i<=maxSlots;i++){
           const s=j.slots[i];
           if(s)activeCount++;
           const status=s?'<span class="badge active">Active</span>':'<span class="badge empty">Empty</span>';
           const id=s?s.streamId:'-';
+          const duration=s?formatDuration(now-s.since):'-';
           const rowClass=s?'occupied':'';
           const disabled=s?'':'disabled';
           const slotUrl='${PUBLIC_HOST}/slot/'+i;
@@ -889,6 +1074,7 @@ app.get("/control",requireAuth,async(req,res)=>{
           <td><strong>\${i}</strong></td>
           <td>\${status}</td>
           <td class="stream-id">\${id}</td>
+          <td class="duration">\${duration}</td>
           <td><a href="/slot/\${i}" target="_blank" class="btn-link">View</a> <button onclick="copySlotUrl('\${slotUrl}')" class="btn-copy">Copy Link</button></td>
           <td><button onclick="clearSlot(\${i})" class="btn-clear" \${disabled}>Clear</button></td></tr>\`;
         }
@@ -898,6 +1084,15 @@ app.get("/control",requireAuth,async(req,res)=>{
       }catch(e){
         console.error('Failed to refresh slots:',e);
       }
+    }
+
+    function formatDuration(ms){
+      const seconds=Math.floor(ms/1000);
+      const minutes=Math.floor(seconds/60);
+      const hours=Math.floor(minutes/60);
+      if(hours>0)return \`\${hours}h \${minutes%60}m\`;
+      if(minutes>0)return \`\${minutes}m \${seconds%60}s\`;
+      return \`\${seconds}s\`;
     }
 
     async function updateSystemInfo(){
@@ -1048,6 +1243,13 @@ app.get("/network",requireAuth,async(req,res)=>{
     loadDevices();
     updateSystemInfo();
     setInterval(updateSystemInfo,5000);
+
+    // Auto-refresh based on settings (default 5 minutes)
+    const refreshInterval = ${SETTINGS.networkRefreshInterval} * 60 * 1000;
+    setInterval(()=>{
+      console.log('Auto-refreshing network devices...');
+      loadDevices();
+    }, refreshInterval);
     </script>
   `;
   res.send(dashboardLayout('Network',content));
@@ -1214,6 +1416,177 @@ app.get("/guide",requireAuth,async(req,res)=>{
     </script>
   `;
   res.send(dashboardLayout('Guide',content));
+});
+
+// Settings page
+app.get("/settings",requireAuth,async(req,res)=>{
+  const content=`
+    <div class="header">
+      <div class="header-title">
+        <h1>Settings</h1>
+        <p class="subtitle">Configure system settings</p>
+      </div>
+    </div>
+    <div class="card">
+      <h3 style="margin-bottom:20px">Authentication</h3>
+      <form id="auth-form" onsubmit="saveAuth(event)">
+        <div class="form-group">
+          <label for="username">Username</label>
+          <input type="text" id="username" name="username" placeholder="admin" minlength="3" required>
+          <small>Minimum 3 characters</small>
+        </div>
+        <div class="form-group">
+          <label for="password">New Password</label>
+          <input type="password" id="password" name="password" placeholder="Leave blank to keep current" minlength="6">
+          <small>Minimum 6 characters (leave blank to keep current)</small>
+        </div>
+        <div class="form-group">
+          <label for="resetPin">Reset PIN</label>
+          <input type="text" id="resetPin" name="resetPin" placeholder="898989" pattern="[0-9]{6}" maxlength="6" required>
+          <small>6-digit PIN for password recovery</small>
+        </div>
+        <button type="submit" class="btn-save">Save Authentication Settings</button>
+      </form>
+    </div>
+    <div class="card">
+      <h3 style="margin-bottom:20px">Video & Network Settings</h3>
+      <form id="settings-form" onsubmit="saveSettings(event)">
+        <div class="form-group">
+          <label for="bitrate">Global Bitrate (kbps)</label>
+          <input type="number" id="bitrate" name="bitrate" min="500" max="10000" value="${SETTINGS.bitrate}" required>
+          <small>Applied to all new camera connections (500-10000 kbps)</small>
+        </div>
+        <div class="form-group">
+          <label for="networkRefresh">Network Auto-Refresh Interval (minutes)</label>
+          <input type="number" id="networkRefresh" name="networkRefresh" min="1" max="60" value="${SETTINGS.networkRefreshInterval}" required>
+          <small>How often to auto-refresh the network devices page (1-60 minutes)</small>
+        </div>
+        <button type="submit" class="btn-save">Save Video & Network Settings</button>
+      </form>
+    </div>
+    <script>
+    // Load current username and PIN
+    document.getElementById('username').value = '${SETTINGS.username}';
+    document.getElementById('resetPin').value = '${SETTINGS.resetPin}';
+
+    async function saveAuth(e) {
+      e.preventDefault();
+      const username = document.getElementById('username').value;
+      const password = document.getElementById('password').value;
+      const resetPin = document.getElementById('resetPin').value;
+
+      try {
+        const res = await fetch('/api/settings', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({username, password: password || undefined, resetPin})
+        });
+        const data = await res.json();
+        if(data.ok) {
+          showToast('Authentication settings saved successfully', 'success');
+          document.getElementById('password').value = ''; // Clear password field
+        } else {
+          showToast('Failed to save settings', 'error');
+        }
+      } catch(e) {
+        showToast('Error: ' + e.message, 'error');
+      }
+    }
+
+    async function saveSettings(e) {
+      e.preventDefault();
+      const bitrate = parseInt(document.getElementById('bitrate').value);
+      const networkRefreshInterval = parseInt(document.getElementById('networkRefresh').value);
+
+      try {
+        const res = await fetch('/api/settings', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({bitrate, networkRefreshInterval})
+        });
+        const data = await res.json();
+        if(data.ok) {
+          showToast('Settings saved successfully', 'success');
+        } else {
+          showToast('Failed to save settings', 'error');
+        }
+      } catch(e) {
+        showToast('Error: ' + e.message, 'error');
+      }
+    }
+    </script>
+  `;
+  res.send(dashboardLayout('Settings',content));
+});
+
+// Activity Log page
+app.get("/activity",requireAuth,async(req,res)=>{
+  const content=`
+    <div class="header">
+      <div class="header-title">
+        <h1>Activity Log</h1>
+        <p class="subtitle">Track camera connections and system events</p>
+      </div>
+    </div>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+        <h3>Recent Activity</h3>
+        <button class="btn-refresh" onclick="loadActivity()">Refresh</button>
+      </div>
+      <div id="activity-container">
+        <p style="text-align:center;color:#888;padding:20px">Loading...</p>
+      </div>
+    </div>
+    <script>
+    async function loadActivity() {
+      try {
+        const data = await fetch('/api/activity?limit=100').then(r => r.json());
+        const container = document.getElementById('activity-container');
+
+        if(!data.logs || data.logs.length === 0) {
+          container.innerHTML = '<p style="text-align:center;color:#888;padding:20px">No activity recorded yet</p>';
+          return;
+        }
+
+        let html = '';
+        data.logs.forEach(log => {
+          const date = new Date(log.timestamp);
+          const timeStr = date.toLocaleString();
+          html += \`<div class="activity-entry \${log.type}">
+            <div class="activity-time">\${timeStr}\${log.slot ? ' - Slot ' + log.slot : ''}</div>
+            <div class="activity-message">\${log.message}</div>
+          </div>\`;
+        });
+        container.innerHTML = html;
+      } catch(e) {
+        document.getElementById('activity-container').innerHTML =
+          '<p style="text-align:center;color:#ef4444;padding:20px">Error loading activity log</p>';
+      }
+    }
+
+    loadActivity();
+
+    // Listen for real-time activity updates
+    const socket = io();
+    socket.on('activity', (entry) => {
+      const container = document.getElementById('activity-container');
+      const date = new Date(entry.timestamp);
+      const timeStr = date.toLocaleString();
+      const html = \`<div class="activity-entry \${entry.type}">
+        <div class="activity-time">\${timeStr}\${entry.slot ? ' - Slot ' + entry.slot : ''}</div>
+        <div class="activity-message">\${entry.message}</div>
+      </div>\`;
+      container.insertAdjacentHTML('afterbegin', html);
+
+      // Keep only last 100 entries visible
+      const entries = container.querySelectorAll('.activity-entry');
+      if(entries.length > 100) {
+        entries[entries.length - 1].remove();
+      }
+    });
+    </script>
+  `;
+  res.send(dashboardLayout('Activity',content));
 });
 
 setInterval(()=>{
