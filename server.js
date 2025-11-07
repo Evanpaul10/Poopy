@@ -154,25 +154,44 @@ app.get("/api/network",async(r,s)=>{
   try{
     const devices=[];
 
-    // Try arp command to find devices
+    // First, ping the network to populate ARP cache
     try{
-      const {stdout:arp}=await execAsync("arp -a");
+      // Ping broadcast address or use nmap/arp-scan if available
+      // Use fping if available, otherwise fall back to a simple ping sweep
+      await execAsync("timeout 3 fping -a -g 192.168.8.0/24 2>/dev/null || for i in {1..254}; do (ping -c 1 -W 1 192.168.8.$i &); done; wait", {timeout: 5000}).catch(()=>{});
+    }catch(e){}
+
+    // Now read ARP table
+    try{
+      const {stdout:arp}=await execAsync("ip neigh show || arp -a");
       const lines=arp.split('\n');
       for(const line of lines){
-        const match=line.match(/\((\d+\.\d+\.\d+\.\d+)\)\s+at\s+([0-9a-f:]+)/i);
+        // Match both ip neigh format and arp -a format
+        let ip, mac;
+
+        // Try ip neigh format: "192.168.8.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE"
+        let match=line.match(/^(\d+\.\d+\.\d+\.\d+)\s+.*lladdr\s+([0-9a-f:]+)/i);
         if(match){
-          const ip=match[1];
-          const mac=match[2].toUpperCase();
-          if(ip.startsWith('192.168.8.')){
-            // Try to get hostname
-            let hostname='Unknown';
-            try{
-              const {stdout:host}=await execAsync(`host ${ip} 2>/dev/null || echo "Unknown"`);
-              const hostMatch=host.match(/pointer\s+(.+)\./);
-              if(hostMatch)hostname=hostMatch[1];
-            }catch(e){}
-            devices.push({ip,mac,hostname});
+          ip=match[1];
+          mac=match[2].toUpperCase();
+        }else{
+          // Try arp -a format: "? (192.168.8.1) at aa:bb:cc:dd:ee:ff"
+          match=line.match(/\((\d+\.\d+\.\d+\.\d+)\)\s+at\s+([0-9a-f:]+)/i);
+          if(match){
+            ip=match[1];
+            mac=match[2].toUpperCase();
           }
+        }
+
+        if(ip && mac && ip.startsWith('192.168.8.') && mac!=='00:00:00:00:00:00'){
+          // Try to get hostname
+          let hostname='Unknown';
+          try{
+            const {stdout:host}=await execAsync(`timeout 1 host ${ip} 2>/dev/null`);
+            const hostMatch=host.match(/pointer\s+(.+)\./);
+            if(hostMatch)hostname=hostMatch[1];
+          }catch(e){}
+          devices.push({ip,mac,hostname});
         }
       }
     }catch(e){}
@@ -330,7 +349,7 @@ app.get("/join",(req,res)=>{
 function id(){let i=localStorage.getItem("sid");if(!i){i=Math.random().toString(36).slice(2,12);localStorage.setItem("sid",i);}return i;}
 const streamId=id();
 async function post(u,b){return fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)});}
-setInterval(()=>post("/api/heartbeat",{streamId},true),5000);
+setInterval(()=>post("/api/heartbeat",{streamId},true),2000);
 window.addEventListener("pagehide",()=>post("/api/leave",{streamId},true));
 document.getElementById("go").onclick=async()=>{
   const w=window.open("about:blank","_blank");
@@ -410,17 +429,21 @@ setInterval(poll,2000);  // Poll every 2 seconds for faster updates
 
 app.get("/control",async(req,res)=>{
   const qr=await QRCode.toDataURL(`${PUBLIC_HOST}/join`);
-  const rows=Object.entries(SLOTS).map(([n,s])=>{
+  // Only show rows up to MAX_SLOTS
+  const rows=[];
+  for(let i=1;i<=MAX_SLOTS;i++){
+    const s=SLOTS[i];
     const status=s?'<span class="badge active">Active</span>':'<span class="badge empty">Empty</span>';
     const id=s?s.streamId:'-';
-    const slotUrl=`${PUBLIC_HOST}/slot/${n}`;
-    return `<tr class="${s?'occupied':''}">
-    <td><strong>${n}</strong></td>
+    const slotUrl=`${PUBLIC_HOST}/slot/${i}`;
+    rows.push(`<tr class="${s?'occupied':''}">
+    <td><strong>${i}</strong></td>
     <td>${status}</td>
     <td class="stream-id">${id}</td>
-    <td><a href="/slot/${n}" target="_blank" class="btn-link">View</a> <button onclick="copySlotUrl('${slotUrl}')" class="btn-copy">Copy Link</button></td>
-    <td><button onclick="clearSlot(${n})" class="btn-clear" ${!s?'disabled':''}>Clear</button></td></tr>`;
-  }).join("");
+    <td><a href="/slot/${i}" target="_blank" class="btn-link">View</a> <button onclick="copySlotUrl('${slotUrl}')" class="btn-copy">Copy Link</button></td>
+    <td><button onclick="clearSlot(${i})" class="btn-clear" ${!s?'disabled':''}>Clear</button></td></tr>`);
+  }
+  const rowsHtml=rows.join("");
 
   const content=`
     <div class="header">
@@ -450,7 +473,7 @@ app.get("/control",async(req,res)=>{
             <div class="stat-label">Active</div>
           </div>
           <div class="stat">
-            <div class="stat-value" id="total-slots">5</div>
+            <div class="stat-value" id="total-slots">${MAX_SLOTS}</div>
             <div class="stat-label">Total Slots</div>
           </div>
         </div>
@@ -458,18 +481,18 @@ app.get("/control",async(req,res)=>{
           <h3>Slot Configuration</h3>
           <div class="settings-row">
             <label>Total Slots:</label>
-            <input type="number" id="total-slots-input" value="5" min="1" max="50">
+            <input type="number" id="total-slots-input" value="${MAX_SLOTS}" min="1" max="50">
           </div>
           <button class="btn-apply" onclick="applySettings()">Apply</button>
         </div>
       </div>
       <div class="card">
         <h3 style="margin-bottom:15px">Camera Slots</h3>
-        <table id="t"><tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>Slot Link</th><th>Action</th></tr>${rows}</table>
+        <table id="t"><tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>Slot Link</th><th>Action</th></tr>${rowsHtml}</table>
       </div>
     </div>
     <script>
-    let maxSlots=5;
+    let maxSlots=${MAX_SLOTS};
 
     async function loadSettings(){
       const j=await fetch('/api/state').then(r=>r.json());
@@ -530,17 +553,23 @@ app.get("/control",async(req,res)=>{
 
     async function updateSystemInfo(){
       try{
-        const info=await fetch('/api/system').then(r=>r.json());
-        document.getElementById('cpu').textContent=info.cpuUsage||'N/A';
-        document.getElementById('ram').textContent=info.memPercent||'N/A';
-        document.getElementById('temp').textContent=info.temperature||'N/A';
-        document.getElementById('disk').textContent=info.diskPercent||'N/A';
-        document.getElementById('disk-avail').textContent=info.diskAvailable||'N/A';
-        document.getElementById('net-rx').textContent=info.networkRx||'N/A';
-        document.getElementById('net-tx').textContent=info.networkTx||'N/A';
-        document.getElementById('uptime').textContent=info.uptime||'N/A';
+        const response=await fetch('/api/system');
+        if(!response.ok){
+          throw new Error('API responded with '+response.status);
+        }
+        const info=await response.json();
+        if(document.getElementById('cpu'))document.getElementById('cpu').textContent=info.cpuUsage||'N/A';
+        if(document.getElementById('ram'))document.getElementById('ram').textContent=info.memPercent||'N/A';
+        if(document.getElementById('temp'))document.getElementById('temp').textContent=info.temperature||'N/A';
+        if(document.getElementById('disk'))document.getElementById('disk').textContent=info.diskPercent||'N/A';
+        if(document.getElementById('disk-avail'))document.getElementById('disk-avail').textContent=info.diskAvailable||'N/A';
+        if(document.getElementById('net-rx'))document.getElementById('net-rx').textContent=info.networkRx||'N/A';
+        if(document.getElementById('net-tx'))document.getElementById('net-tx').textContent=info.networkTx||'N/A';
+        if(document.getElementById('uptime'))document.getElementById('uptime').textContent=info.uptime||'N/A';
       }catch(e){
         console.error('Failed to fetch system info:',e);
+        // Set error indicator
+        if(document.getElementById('cpu'))document.getElementById('cpu').textContent='Error';
       }
     }
 
@@ -604,16 +633,18 @@ app.get("/network",async(req,res)=>{
     }
     async function updateSystemInfo(){
       try{
-        const info=await fetch('/api/system').then(r=>r.json());
-        document.getElementById('cpu').textContent=info.cpuUsage||'N/A';
-        document.getElementById('ram').textContent=info.memPercent||'N/A';
-        document.getElementById('temp').textContent=info.temperature||'N/A';
-        document.getElementById('disk').textContent=info.diskPercent||'N/A';
-        document.getElementById('disk-avail').textContent=info.diskAvailable||'N/A';
-        document.getElementById('net-rx').textContent=info.networkRx||'N/A';
-        document.getElementById('net-tx').textContent=info.networkTx||'N/A';
-        document.getElementById('uptime').textContent=info.uptime||'N/A';
-      }catch(e){}
+        const response=await fetch('/api/system');
+        if(!response.ok)throw new Error('API error');
+        const info=await response.json();
+        if(document.getElementById('cpu'))document.getElementById('cpu').textContent=info.cpuUsage||'N/A';
+        if(document.getElementById('ram'))document.getElementById('ram').textContent=info.memPercent||'N/A';
+        if(document.getElementById('temp'))document.getElementById('temp').textContent=info.temperature||'N/A';
+        if(document.getElementById('disk'))document.getElementById('disk').textContent=info.diskPercent||'N/A';
+        if(document.getElementById('disk-avail'))document.getElementById('disk-avail').textContent=info.diskAvailable||'N/A';
+        if(document.getElementById('net-rx'))document.getElementById('net-rx').textContent=info.networkRx||'N/A';
+        if(document.getElementById('net-tx'))document.getElementById('net-tx').textContent=info.networkTx||'N/A';
+        if(document.getElementById('uptime'))document.getElementById('uptime').textContent=info.uptime||'N/A';
+      }catch(e){console.error('System info error:',e);}
     }
     loadDevices();
     updateSystemInfo();
@@ -664,16 +695,18 @@ app.get("/debug",async(req,res)=>{
     }
     async function updateSystemInfo(){
       try{
-        const info=await fetch('/api/system').then(r=>r.json());
-        document.getElementById('cpu').textContent=info.cpuUsage||'N/A';
-        document.getElementById('ram').textContent=info.memPercent||'N/A';
-        document.getElementById('temp').textContent=info.temperature||'N/A';
-        document.getElementById('disk').textContent=info.diskPercent||'N/A';
-        document.getElementById('disk-avail').textContent=info.diskAvailable||'N/A';
-        document.getElementById('net-rx').textContent=info.networkRx||'N/A';
-        document.getElementById('net-tx').textContent=info.networkTx||'N/A';
-        document.getElementById('uptime').textContent=info.uptime||'N/A';
-      }catch(e){}
+        const response=await fetch('/api/system');
+        if(!response.ok)throw new Error('API error');
+        const info=await response.json();
+        if(document.getElementById('cpu'))document.getElementById('cpu').textContent=info.cpuUsage||'N/A';
+        if(document.getElementById('ram'))document.getElementById('ram').textContent=info.memPercent||'N/A';
+        if(document.getElementById('temp'))document.getElementById('temp').textContent=info.temperature||'N/A';
+        if(document.getElementById('disk'))document.getElementById('disk').textContent=info.diskPercent||'N/A';
+        if(document.getElementById('disk-avail'))document.getElementById('disk-avail').textContent=info.diskAvailable||'N/A';
+        if(document.getElementById('net-rx'))document.getElementById('net-rx').textContent=info.networkRx||'N/A';
+        if(document.getElementById('net-tx'))document.getElementById('net-tx').textContent=info.networkTx||'N/A';
+        if(document.getElementById('uptime'))document.getElementById('uptime').textContent=info.uptime||'N/A';
+      }catch(e){console.error('System info error:',e);}
     }
     loadLogs();
     updateSystemInfo();
@@ -764,16 +797,18 @@ app.get("/guide",async(req,res)=>{
     <script>
     async function updateSystemInfo(){
       try{
-        const info=await fetch('/api/system').then(r=>r.json());
-        document.getElementById('cpu').textContent=info.cpuUsage||'N/A';
-        document.getElementById('ram').textContent=info.memPercent||'N/A';
-        document.getElementById('temp').textContent=info.temperature||'N/A';
-        document.getElementById('disk').textContent=info.diskPercent||'N/A';
-        document.getElementById('disk-avail').textContent=info.diskAvailable||'N/A';
-        document.getElementById('net-rx').textContent=info.networkRx||'N/A';
-        document.getElementById('net-tx').textContent=info.networkTx||'N/A';
-        document.getElementById('uptime').textContent=info.uptime||'N/A';
-      }catch(e){}
+        const response=await fetch('/api/system');
+        if(!response.ok)throw new Error('API error');
+        const info=await response.json();
+        if(document.getElementById('cpu'))document.getElementById('cpu').textContent=info.cpuUsage||'N/A';
+        if(document.getElementById('ram'))document.getElementById('ram').textContent=info.memPercent||'N/A';
+        if(document.getElementById('temp'))document.getElementById('temp').textContent=info.temperature||'N/A';
+        if(document.getElementById('disk'))document.getElementById('disk').textContent=info.diskPercent||'N/A';
+        if(document.getElementById('disk-avail'))document.getElementById('disk-avail').textContent=info.diskAvailable||'N/A';
+        if(document.getElementById('net-rx'))document.getElementById('net-rx').textContent=info.networkRx||'N/A';
+        if(document.getElementById('net-tx'))document.getElementById('net-tx').textContent=info.networkTx||'N/A';
+        if(document.getElementById('uptime'))document.getElementById('uptime').textContent=info.uptime||'N/A';
+      }catch(e){console.error('System info error:',e);}
     }
     updateSystemInfo();
     setInterval(updateSystemInfo,5000);
