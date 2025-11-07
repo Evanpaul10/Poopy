@@ -260,11 +260,12 @@ app.get("/control",async(req,res)=>{
   body{background:#0f0f23;color:#e0e0e0;
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
     padding:20px;min-height:100vh}
-  .header{text-align:center;margin-bottom:40px;position:relative}
-  .header-title{display:inline-block}
-  .system-compact{position:absolute;top:0;right:35%;text-align:left;font-size:0.75em;color:#888;line-height:1.6}
-  .system-compact div{margin-bottom:3px}
-  @media(max-width:768px){.system-compact{position:static;margin-top:20px;text-align:center}}
+  .header{text-align:center;margin-bottom:40px;position:relative;min-height:80px;display:flex;align-items:center;justify-content:center}
+  .header-title{flex:1;max-width:800px}
+  .system-compact{position:absolute;top:0;right:0;text-align:right;font-size:0.7em;color:#888;line-height:1.5;white-space:nowrap}
+  .system-compact div{margin-bottom:2px}
+  @media(max-width:1024px){.system-compact{font-size:0.65em}}
+  @media(max-width:768px){.header{flex-direction:column;min-height:auto}.system-compact{position:static;margin-top:15px;text-align:center;font-size:0.75em}}
   h1{color:#fff;font-size:2em;margin-bottom:10px}
   .subtitle{color:#888;font-size:1em;margin-bottom:30px}
   .container{max-width:1200px;margin:0 auto}
