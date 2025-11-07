@@ -517,10 +517,8 @@ app.post("/api/cameras/scan",requireAuth,async(r,s)=>{
       subnets.add(customSubnet);
       console.log('Scanning custom subnet:',customSubnet);
     }else{
-      // Also scan common home network ranges even if not directly connected
-      const commonSubnets=['192.168.0','192.168.1','192.168.4','192.168.8','10.0.0','10.0.1'];
-      commonSubnets.forEach(s=>subnets.add(s));
-      console.log('Scanning local + common subnets:',Array.from(subnets));
+      // Only scan Pi's local networks by default (not all common ranges)
+      console.log('Scanning local subnets only:',Array.from(subnets));
     }
 
     console.log('Local IPs to exclude:',Array.from(localIPs));
@@ -548,14 +546,14 @@ app.post("/api/cameras/scan",requireAuth,async(r,s)=>{
 
     // Scan each subnet in batches for better performance
     for(const subnet of subnets){
-      const batchSize=50; // Scan 50 IPs at a time
+      const batchSize=100; // Scan 100 IPs at a time for speed
       for(let start=1;start<255;start+=batchSize){
         const batch=[];
         for(let i=start;i<Math.min(start+batchSize,255);i++){
           const ip=subnet+'.'+i;
           // Skip local IPs
           if(!localIPs.has(ip)){
-            batch.push(checkPort(ip,8888,2500)); // 2.5 second timeout
+            batch.push(checkPort(ip,8888,1000)); // 1 second timeout for speed
           }
         }
 
@@ -1889,7 +1887,10 @@ app.get("/camera-control",requireAuth,async(req,res)=>{
         </div>
       </div>
       <div style="margin-bottom:15px;padding:10px;background:#1e1e35;border-radius:6px;font-size:0.9em;color:#888">
-        💡 <strong>Tip:</strong> Auto-scan checks common networks (192.168.0/1/4/8, 10.0.0/1). Enter a custom subnet above to scan a specific network (e.g., "192.168.4" for 192.168.4.0-255).
+        💡 <strong>Tip:</strong> <strong>Manual addition recommended!</strong> Enter your iPhone IP below to add instantly, or use custom subnet scan (e.g., "192.168.4") for faster targeted scanning.
+      </div>
+      <div style="margin-bottom:15px;padding:10px;background:#252540;border-left:3px solid #10b981;border-radius:6px;font-size:0.9em;color:#e0e0e0">
+        📱 <strong>Important:</strong> In the OBS Camera app, set the remote control mode to <strong>Auto</strong> (not Manual) for the controls below to work properly.
       </div>
 
       <div id="add-camera-form" style="display:none;margin-bottom:20px;padding:20px;background:#252540;border-radius:8px">
@@ -1961,6 +1962,28 @@ app.get("/camera-control",requireAuth,async(req,res)=>{
     let cameras=[];
     let scannedCameras=[];
 
+    // Debounce function to prevent too many rapid updates
+    function debounce(func, wait) {
+      let timeout;
+      return function executedFunction(...args) {
+        const later = () => {
+          clearTimeout(timeout);
+          func(...args);
+        };
+        clearTimeout(timeout);
+        timeout = setTimeout(later, wait);
+      };
+    }
+
+    // Create debounced version of updateSetting with 300ms delay
+    const debouncedUpdateSetting = debounce((cameraId, key, value) => {
+      updateSetting(cameraId, key, value);
+    }, 300);
+
+    const debouncedUpdateFocusPosition = debounce((cameraId, position) => {
+      updateFocusPosition(cameraId, position);
+    }, 300);
+
     socket.on('cameras',(data)=>{
       cameras=data.cameras;
       renderCameras();
@@ -2031,12 +2054,16 @@ app.get("/camera-control",requireAuth,async(req,res)=>{
             <h4>Camera & Quality</h4>
             <div class="control-row">
               <span class="control-label">Camera:</span>
-              <select class="control-input" onchange="updateSetting('\${camera.id}','selectedCamera',this.value)">
+              <select class="control-input" onchange="updateCameraSetting('\${camera.id}','selectedCamera',this.value)">
                 <option value="front" \${s.selectedCamera==='front'?'selected':''}>Front</option>
-                <option value="rear" \${s.selectedCamera==='rear'?'selected':''}>Rear</option>
-                <option value="ultrawide" \${s.selectedCamera==='ultrawide'?'selected':''}>Ultra Wide</option>
+                <option value="back" \${s.selectedCamera==='back'?'selected':''}>Back</option>
+                <option value="ultra-wide" \${s.selectedCamera==='ultra-wide'?'selected':''}>Ultra Wide</option>
+                <option value="wide" \${s.selectedCamera==='wide'?'selected':''}>Wide</option>
                 <option value="telephoto" \${s.selectedCamera==='telephoto'?'selected':''}>Telephoto</option>
               </select>
+            </div>
+            <div style="font-size:0.85em;color:#888;margin-top:5px">
+              Available cameras depend on iPhone model. If switching doesn't work, the camera may not have that lens.
             </div>
             <div class="control-row">
               <span class="control-label">Resolution:</span>
@@ -2061,7 +2088,7 @@ app.get("/camera-control",requireAuth,async(req,res)=>{
             <div class="control-row">
               <span class="control-label">Zoom:</span>
               <input type="range" class="control-input" min="1" max="10" step="0.1" value="\${s.zoomLevel||1}"
-                oninput="updateSetting('\${camera.id}','zoomLevel',parseFloat(this.value))">
+                oninput="this.nextElementSibling.textContent=parseFloat(this.value).toFixed(1)+'x';debouncedUpdateSetting('\${camera.id}','zoomLevel',parseFloat(this.value))">
               <span style="min-width:40px;color:#888">\${(s.zoomLevel||1).toFixed(1)}x</span>
             </div>
             <div class="control-row">
@@ -2086,7 +2113,7 @@ app.get("/camera-control",requireAuth,async(req,res)=>{
             <div class="control-row">
               <span class="control-label">Temperature:</span>
               <input type="range" class="control-input" min="1800" max="8000" step="100" value="\${s.temperature||5000}"
-                oninput="updateSetting('\${camera.id}','temperature',parseInt(this.value))">
+                oninput="this.nextElementSibling.textContent=parseInt(this.value)+'K';debouncedUpdateSetting('\${camera.id}','temperature',parseInt(this.value))">
               <span style="min-width:50px;color:#888">\${s.temperature||5000}K</span>
             </div>\`:''}
           </div>
@@ -2104,7 +2131,7 @@ app.get("/camera-control",requireAuth,async(req,res)=>{
             <div class="control-row">
               <span class="control-label">Position:</span>
               <input type="range" class="control-input" min="0" max="1" step="0.01" value="\${s.focusConfiguration?.lensPosition||0.5}"
-                oninput="updateFocusPosition('\${camera.id}',parseFloat(this.value))">
+                oninput="this.nextElementSibling.textContent=(parseFloat(this.value)*100).toFixed(0)+'%';debouncedUpdateFocusPosition('\${camera.id}',parseFloat(this.value))">
               <span style="min-width:50px;color:#888">\${((s.focusConfiguration?.lensPosition||0.5)*100).toFixed(0)}%</span>
             </div>\`:''}
           </div>
@@ -2284,6 +2311,29 @@ app.get("/camera-control",requireAuth,async(req,res)=>{
       }catch(e){
         console.error('Error removing camera:',e);
         showToast('Error removing camera','error');
+      }
+    }
+
+    async function updateCameraSetting(cameraId,key,value){
+      const camera=cameras.find(c=>c.id===cameraId);
+      if(!camera||!camera.settings)return;
+
+      console.log(\`Changing \${key} from \${camera.settings[key]} to \${value}\`);
+
+      const newSettings={...camera.settings,[key]:value};
+
+      try{
+        await fetch(\`/api/cameras/\${cameraId}/command\`,{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(newSettings)
+        });
+        camera.settings[key]=value;
+        renderCameras();
+        showToast(\`Camera switched to \${value}\`,'info');
+      }catch(e){
+        console.error('Error updating camera:',e);
+        showToast('Error switching camera','error');
       }
     }
 
