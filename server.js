@@ -693,7 +693,7 @@ app.get("/network",async(req,res)=>{
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
         <h3>Discovered Devices</h3>
-        <button class="btn-refresh" onclick="loadDevices()">Refresh</button>
+        <button class="btn-refresh" id="refresh-btn" onclick="refreshDevices()">Refresh</button>
       </div>
       <table id="device-table">
         <tr><th>IP Address</th><th>MAC Address</th><th>Hostname</th></tr>
@@ -701,9 +701,24 @@ app.get("/network",async(req,res)=>{
       </table>
     </div>
     <script>
+    let isLoading=false;
+
     async function loadDevices(){
+      if(isLoading){
+        console.log('Already loading, skipping...');
+        return;
+      }
+      isLoading=true;
+      const btn=document.getElementById('refresh-btn');
+      if(btn){
+        btn.disabled=true;
+        btn.textContent='Scanning...';
+      }
+
       try{
         console.log('Loading network devices...');
+        document.getElementById('device-table').innerHTML='<tr><th>IP Address</th><th>MAC Address</th><th>Hostname</th></tr><tr><td colspan="3" style="text-align:center;padding:20px;color:#888">Scanning network...</td></tr>';
+
         const data=await fetch('/api/network').then(r=>r.json());
         console.log('Network API response:',data);
         const devices=data.devices||[];
@@ -737,8 +752,19 @@ app.get("/network",async(req,res)=>{
         console.log(\`Loaded \${devices.length} devices\`);
       }catch(e){
         console.error('Error loading devices:',e);
-        document.getElementById('device-table').innerHTML='<tr><td colspan="3" style="text-align:center;padding:20px;color:#ef4444">Error loading devices: '+e.message+'</td></tr>';
+        document.getElementById('device-table').innerHTML='<tr><th>IP Address</th><th>MAC Address</th><th>Hostname</th></tr><tr><td colspan="3" style="text-align:center;padding:20px;color:#ef4444">Error loading devices: '+e.message+'</td></tr>';
+      }finally{
+        isLoading=false;
+        if(btn){
+          btn.disabled=false;
+          btn.textContent='Refresh';
+        }
       }
+    }
+
+    function refreshDevices(){
+      console.log('Refresh button clicked');
+      loadDevices();
     }
     async function updateSystemInfo(){
       try{
