@@ -496,11 +496,13 @@ app.post("/api/cameras/scan",requireAuth,async(r,s)=>{
     const os=require("os");
     const interfaces=os.networkInterfaces();
     const subnets=new Set();
+    const localIPs=new Set();
 
-    // Extract all local network subnets
+    // Extract all local network subnets and local IPs
     for(const ifname in interfaces){
       for(const iface of interfaces[ifname]){
         if(iface.family==='IPv4' && !iface.internal){
+          localIPs.add(iface.address);
           const parts=iface.address.split('.');
           const subnet=parts[0]+'.'+parts[1]+'.'+parts[2];
           subnets.add(subnet);
@@ -509,51 +511,62 @@ app.post("/api/cameras/scan",requireAuth,async(r,s)=>{
     }
 
     console.log('Scanning subnets:',Array.from(subnets));
+    console.log('Local IPs to exclude:',Array.from(localIPs));
 
-    // Scan each subnet for devices with port 8888 open
+    // Helper function to check a single IP
+    function checkPort(ip, port, timeout){
+      return new Promise((resolve)=>{
+        const socket=new net.Socket();
+        socket.setTimeout(timeout);
+        socket.on('connect',()=>{
+          socket.destroy();
+          resolve({ip,open:true});
+        });
+        socket.on('timeout',()=>{
+          socket.destroy();
+          resolve({ip,open:false});
+        });
+        socket.on('error',()=>{
+          socket.destroy();
+          resolve({ip,open:false});
+        });
+        socket.connect(port,ip);
+      });
+    }
+
+    // Scan each subnet in batches for better performance
     for(const subnet of subnets){
-      const promises=[];
-      for(let i=1;i<255;i++){
-        const ip=subnet+'.'+i;
-        promises.push(
-          new Promise((resolve)=>{
-            const socket=new net.Socket();
-            socket.setTimeout(1000);
-            socket.on('connect',()=>{
-              socket.destroy();
-              resolve({ip,open:true});
-            });
-            socket.on('timeout',()=>{
-              socket.destroy();
-              resolve({ip,open:false});
-            });
-            socket.on('error',()=>{
-              socket.destroy();
-              resolve({ip,open:false});
-            });
-            socket.connect(8888,ip);
-          })
-        );
-      }
+      const batchSize=50; // Scan 50 IPs at a time
+      for(let start=1;start<255;start+=batchSize){
+        const batch=[];
+        for(let i=start;i<Math.min(start+batchSize,255);i++){
+          const ip=subnet+'.'+i;
+          // Skip local IPs
+          if(!localIPs.has(ip)){
+            batch.push(checkPort(ip,8888,2500)); // 2.5 second timeout
+          }
+        }
 
-      const results=await Promise.all(promises);
-      for(const result of results){
-        if(result.open){
-          // Check if already in CAMERAS
-          const existing=CAMERAS.find(c=>c.ip===result.ip);
-          if(!existing){
-            foundCameras.push({
-              ip:result.ip,
-              name:'Camera '+result.ip,
-              autoDetected:true
-            });
+        const results=await Promise.all(batch);
+        for(const result of results){
+          if(result.open){
+            // Check if already in CAMERAS
+            const existing=CAMERAS.find(c=>c.ip===result.ip);
+            if(!existing){
+              console.log('Found camera at:',result.ip);
+              foundCameras.push({
+                ip:result.ip,
+                name:'Camera '+result.ip,
+                autoDetected:true
+              });
+            }
           }
         }
       }
     }
 
-    console.log('Found cameras:',foundCameras);
-    s.json({cameras:foundCameras});
+    console.log('Scan complete. Found cameras:',foundCameras);
+    s.json({cameras:foundCameras,scannedSubnets:Array.from(subnets)});
   }catch(e){
     console.error('Camera scan error:',e);
     s.json({error:e.message,cameras:[]});
