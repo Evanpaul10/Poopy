@@ -146,6 +146,157 @@ app.get("/api/system",async(r,s)=>{
   }
 });
 
+app.get("/api/network",async(r,s)=>{
+  const {exec}=require("child_process");
+  const util=require("util");
+  const execAsync=util.promisify(exec);
+
+  try{
+    const devices=[];
+
+    // Try arp command to find devices
+    try{
+      const {stdout:arp}=await execAsync("arp -a");
+      const lines=arp.split('\n');
+      for(const line of lines){
+        const match=line.match(/\((\d+\.\d+\.\d+\.\d+)\)\s+at\s+([0-9a-f:]+)/i);
+        if(match){
+          const ip=match[1];
+          const mac=match[2].toUpperCase();
+          if(ip.startsWith('192.168.8.')){
+            // Try to get hostname
+            let hostname='Unknown';
+            try{
+              const {stdout:host}=await execAsync(`host ${ip} 2>/dev/null || echo "Unknown"`);
+              const hostMatch=host.match(/pointer\s+(.+)\./);
+              if(hostMatch)hostname=hostMatch[1];
+            }catch(e){}
+            devices.push({ip,mac,hostname});
+          }
+        }
+      }
+    }catch(e){}
+
+    s.json({devices});
+  }catch(e){
+    s.json({error:e.message,devices:[]});
+  }
+});
+
+app.get("/api/logs",async(r,s)=>{
+  const {exec}=require("child_process");
+  const util=require("util");
+  const execAsync=util.promisify(exec);
+
+  try{
+    const logs={};
+
+    // Service logs
+    try{
+      const {stdout:service}=await execAsync("journalctl -u merimac-bridge -n 100 --no-pager");
+      logs.service=service;
+    }catch(e){logs.service='Failed to fetch service logs';}
+
+    // System logs (recent errors)
+    try{
+      const {stdout:system}=await execAsync("journalctl -p err -n 50 --no-pager");
+      logs.system=system;
+    }catch(e){logs.system='Failed to fetch system logs';}
+
+    s.json(logs);
+  }catch(e){
+    s.json({error:e.message});
+  }
+});
+
+// Shared layout function for dashboard pages
+function dashboardLayout(pageName,content){
+  return `<!doctype html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>${pageName} - Merimac Bridge</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0f0f23;color:#e0e0e0;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;min-height:100vh;display:flex}
+  .sidebar{width:220px;background:#1a1a2e;height:100vh;position:fixed;left:0;top:0;padding:20px;box-shadow:2px 0 10px rgba(0,0,0,0.3)}
+  .sidebar-title{color:#fff;font-size:1.3em;font-weight:700;margin-bottom:30px;padding-bottom:15px;border-bottom:2px solid #667eea}
+  .nav-item{display:block;padding:12px 15px;margin-bottom:8px;border-radius:8px;color:#e0e0e0;text-decoration:none;transition:all 0.2s}
+  .nav-item:hover{background:#252540;transform:translateX(5px)}
+  .nav-item.active{background:#667eea;color:#fff}
+  .main-content{margin-left:220px;flex:1;padding:20px;min-height:100vh}
+  @media(max-width:768px){.sidebar{width:100%;height:auto;position:static;padding:15px}.main-content{margin-left:0}}
+  .header{text-align:center;margin-bottom:40px;position:relative;min-height:80px;display:flex;align-items:center;justify-content:center}
+  .header-title{flex:1;max-width:800px}
+  .system-compact{position:absolute;top:0;right:0;text-align:right;font-size:0.85em;color:#888;line-height:1.6;white-space:nowrap}
+  .system-compact div{margin-bottom:3px}
+  @media(max-width:1024px){.system-compact{font-size:0.75em}}
+  @media(max-width:768px){.header{flex-direction:column;min-height:auto}.system-compact{position:static;margin-top:15px;text-align:center;font-size:0.85em}}
+  h1{color:#fff;font-size:2em;margin-bottom:10px}
+  .subtitle{color:#888;font-size:1em;margin-bottom:30px}
+  .container{max-width:1400px;margin:0 auto}
+  .grid{display:grid;grid-template-columns:1fr 2fr;gap:30px;margin-bottom:30px}
+  @media(max-width:768px){.grid{grid-template-columns:1fr}}
+  .card{background:#1a1a2e;border-radius:12px;padding:25px;box-shadow:0 4px 20px rgba(0,0,0,0.3);margin-bottom:20px}
+  .qr-card{text-align:center}
+  .qr-card img{border-radius:8px;background:#fff;padding:15px;margin-bottom:15px}
+  .qr-card .link-container{margin:15px auto;max-width:280px}
+  .qr-card a{color:#667eea;text-decoration:none;font-weight:500;display:block;word-wrap:break-word;overflow-wrap:break-word;line-height:1.4}
+  .qr-card a:hover{text-decoration:underline}
+  table{width:100%;border-collapse:collapse}
+  th{background:#252540;color:#fff;padding:12px;text-align:left;font-weight:600;border-bottom:2px solid #667eea}
+  td{padding:12px;border-bottom:1px solid #2a2a3e}
+  tr.occupied{background:#1e1e35}
+  tr:hover{background:#252540}
+  .stream-id{font-family:monospace;font-size:0.9em;color:#888}
+  .badge{display:inline-block;padding:4px 12px;border-radius:12px;font-size:0.85em;font-weight:600}
+  .badge.active{background:#10b981;color:#fff}
+  .badge.empty{background:#374151;color:#9ca3af}
+  .btn-link{color:#667eea;text-decoration:none;font-weight:500;padding:6px 16px;border-radius:6px;background:rgba(102,126,234,0.1);display:inline-block;transition:all 0.2s}
+  .btn-link:hover{background:rgba(102,126,234,0.2);transform:translateY(-1px)}
+  .btn-clear{background:#ef4444;color:#fff;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-weight:500;transition:all 0.2s}
+  .btn-clear:hover:not(:disabled){background:#dc2626;transform:translateY(-1px)}
+  .btn-clear:disabled{background:#374151;cursor:not-allowed;opacity:0.5}
+  .btn-copy{background:#667eea;color:#fff;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-weight:500;transition:all 0.2s;font-size:0.85em}
+  .btn-copy:hover{background:#764ba2;transform:translateY(-1px)}
+  .btn-copy:active{background:#5a67d8}
+  .btn-refresh{background:#10b981;color:#fff;border:none;padding:8px 20px;border-radius:6px;cursor:pointer;font-weight:500;transition:all 0.2s}
+  .btn-refresh:hover{background:#059669;transform:translateY(-1px)}
+  .stats{display:flex;justify-content:space-around;margin-top:20px;padding-top:20px;border-top:1px solid #2a2a3e}
+  .stat{text-align:center}
+  .stat-value{font-size:2em;font-weight:700;color:#667eea}
+  .stat-label{color:#888;font-size:0.9em;margin-top:5px}
+  .settings-box{margin-top:20px;padding-top:20px;border-top:1px solid #2a2a3e}
+  .settings-box h3{margin-bottom:15px;font-size:1em}
+  .settings-row{display:flex;gap:15px;align-items:center;margin-bottom:15px}
+  .settings-row label{color:#e0e0e0;font-weight:500;flex:1}
+  .settings-row input{background:#252540;border:1px solid #667eea;color:#fff;padding:8px 12px;border-radius:6px;width:100px;font-size:1em}
+  .settings-row input:focus{outline:none;border-color:#764ba2}
+  .btn-apply{background:#667eea;color:#fff;border:none;padding:8px 20px;border-radius:6px;cursor:pointer;font-weight:500;transition:all 0.2s;width:100%}
+  .btn-apply:hover{background:#764ba2;transform:translateY(-1px)}
+  .log-container{background:#0a0a15;padding:15px;border-radius:8px;font-family:monospace;font-size:0.85em;max-height:500px;overflow-y:auto;white-space:pre-wrap;word-wrap:break-word}
+  .guide-section{margin-bottom:30px}
+  .guide-section h3{color:#667eea;margin-bottom:15px}
+  .guide-section p{line-height:1.8;margin-bottom:10px}
+  .guide-section ol{margin-left:20px;line-height:2}
+  .guide-section code{background:#252540;padding:2px 8px;border-radius:4px;color:#10b981}
+</style>
+</head><body>
+<div class="sidebar">
+  <div class="sidebar-title">Merimac Bridge</div>
+  <a href="/control" class="nav-item ${pageName==='Control'?'active':''}">Control</a>
+  <a href="/network" class="nav-item ${pageName==='Network'?'active':''}">Network</a>
+  <a href="/debug" class="nav-item ${pageName==='Debug'?'active':''}">Debug</a>
+  <a href="/guide" class="nav-item ${pageName==='Guide'?'active':''}">Guide</a>
+</div>
+<div class="main-content">
+  <div class="container">
+    ${content}
+  </div>
+</div>
+<script src="/socket.io/socket.io.js"></script>
+</body></html>`;
+}
+
 app.get("/join",(req,res)=>{
   res.send(`<!doctype html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -461,6 +612,235 @@ io().on('state',refresh);
 updateSystemInfo();
 setInterval(updateSystemInfo,5000); // Update system info every 5 seconds
 </script></body></html>`);
+});
+
+// Network page
+app.get("/network",async(req,res)=>{
+  const content=`
+    <div class="header">
+      <div class="system-compact" id="system-info-compact">
+        <div>CPU: <span id="cpu">-</span></div>
+        <div>RAM: <span id="ram">-</span></div>
+        <div>Temp: <span id="temp">-</span></div>
+        <div>Disk: <span id="disk">-</span> (<span id="disk-avail">-</span> free)</div>
+        <div>Net: ↓<span id="net-rx">-</span> ↑<span id="net-tx">-</span></div>
+        <div>Uptime: <span id="uptime">-</span></div>
+      </div>
+      <div class="header-title">
+        <h1>Network Devices</h1>
+        <p class="subtitle">Devices on 192.168.8.x network</p>
+      </div>
+    </div>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+        <h3>Discovered Devices</h3>
+        <button class="btn-refresh" onclick="loadDevices()">Refresh</button>
+      </div>
+      <table id="device-table">
+        <tr><th>IP Address</th><th>MAC Address</th><th>Hostname</th></tr>
+        <tr><td colspan="3" style="text-align:center;padding:20px;color:#888">Loading devices...</td></tr>
+      </table>
+    </div>
+    <script>
+    async function loadDevices(){
+      try{
+        const data=await fetch('/api/network').then(r=>r.json());
+        const devices=data.devices||[];
+        let html='<tr><th>IP Address</th><th>MAC Address</th><th>Hostname</th></tr>';
+        if(devices.length===0){
+          html+='<tr><td colspan="3" style="text-align:center;padding:20px;color:#888">No devices found</td></tr>';
+        }else{
+          devices.forEach(d=>{
+            html+=\`<tr>
+              <td>\${d.ip}</td>
+              <td style="font-family:monospace">\${d.mac}</td>
+              <td>\${d.hostname}</td>
+            </tr>\`;
+          });
+        }
+        document.getElementById('device-table').innerHTML=html;
+      }catch(e){
+        document.getElementById('device-table').innerHTML='<tr><td colspan="3" style="text-align:center;padding:20px;color:#ef4444">Error loading devices</td></tr>';
+      }
+    }
+    async function updateSystemInfo(){
+      try{
+        const info=await fetch('/api/system').then(r=>r.json());
+        document.getElementById('cpu').textContent=info.cpuUsage||'N/A';
+        document.getElementById('ram').textContent=info.memPercent||'N/A';
+        document.getElementById('temp').textContent=info.temperature||'N/A';
+        document.getElementById('disk').textContent=info.diskPercent||'N/A';
+        document.getElementById('disk-avail').textContent=info.diskAvailable||'N/A';
+        document.getElementById('net-rx').textContent=info.networkRx||'N/A';
+        document.getElementById('net-tx').textContent=info.networkTx||'N/A';
+        document.getElementById('uptime').textContent=info.uptime||'N/A';
+      }catch(e){}
+    }
+    loadDevices();
+    updateSystemInfo();
+    setInterval(updateSystemInfo,5000);
+    </script>
+  `;
+  res.send(dashboardLayout('Network',content));
+});
+
+// Debug page
+app.get("/debug",async(req,res)=>{
+  const content=`
+    <div class="header">
+      <div class="system-compact" id="system-info-compact">
+        <div>CPU: <span id="cpu">-</span></div>
+        <div>RAM: <span id="ram">-</span></div>
+        <div>Temp: <span id="temp">-</span></div>
+        <div>Disk: <span id="disk">-</span> (<span id="disk-avail">-</span> free)</div>
+        <div>Net: ↓<span id="net-rx">-</span> ↑<span id="net-tx">-</span></div>
+        <div>Uptime: <span id="uptime">-</span></div>
+      </div>
+      <div class="header-title">
+        <h1>Debug & Logs</h1>
+        <p class="subtitle">System diagnostics and logs</p>
+      </div>
+    </div>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px">
+        <h3>Service Logs (merimac-bridge)</h3>
+        <button class="btn-refresh" onclick="loadLogs()">Refresh</button>
+      </div>
+      <div class="log-container" id="service-logs">Loading...</div>
+    </div>
+    <div class="card">
+      <h3 style="margin-bottom:15px">System Errors</h3>
+      <div class="log-container" id="system-logs">Loading...</div>
+    </div>
+    <script>
+    async function loadLogs(){
+      try{
+        const data=await fetch('/api/logs').then(r=>r.json());
+        document.getElementById('service-logs').textContent=data.service||'No logs available';
+        document.getElementById('system-logs').textContent=data.system||'No errors found';
+      }catch(e){
+        document.getElementById('service-logs').textContent='Error loading logs';
+        document.getElementById('system-logs').textContent='Error loading logs';
+      }
+    }
+    async function updateSystemInfo(){
+      try{
+        const info=await fetch('/api/system').then(r=>r.json());
+        document.getElementById('cpu').textContent=info.cpuUsage||'N/A';
+        document.getElementById('ram').textContent=info.memPercent||'N/A';
+        document.getElementById('temp').textContent=info.temperature||'N/A';
+        document.getElementById('disk').textContent=info.diskPercent||'N/A';
+        document.getElementById('disk-avail').textContent=info.diskAvailable||'N/A';
+        document.getElementById('net-rx').textContent=info.networkRx||'N/A';
+        document.getElementById('net-tx').textContent=info.networkTx||'N/A';
+        document.getElementById('uptime').textContent=info.uptime||'N/A';
+      }catch(e){}
+    }
+    loadLogs();
+    updateSystemInfo();
+    setInterval(updateSystemInfo,5000);
+    </script>
+  `;
+  res.send(dashboardLayout('Debug',content));
+});
+
+// Guide page
+app.get("/guide",async(req,res)=>{
+  const content=`
+    <div class="header">
+      <div class="system-compact" id="system-info-compact">
+        <div>CPU: <span id="cpu">-</span></div>
+        <div>RAM: <span id="ram">-</span></div>
+        <div>Temp: <span id="temp">-</span></div>
+        <div>Disk: <span id="disk">-</span> (<span id="disk-avail">-</span> free)</div>
+        <div>Net: ↓<span id="net-rx">-</span> ↑<span id="net-tx">-</span></div>
+        <div>Uptime: <span id="uptime">-</span></div>
+      </div>
+      <div class="header-title">
+        <h1>User Guide</h1>
+        <p class="subtitle">How to use the Merimac Video Ninja Bridge</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="guide-section">
+        <h3>Getting Started</h3>
+        <p>The Merimac Video Ninja Bridge allows you to easily connect multiple cameras to your live production using a single QR code.</p>
+      </div>
+
+      <div class="guide-section">
+        <h3>How to Connect a Camera</h3>
+        <ol>
+          <li>Go to the <strong>Control</strong> page</li>
+          <li>Show the QR code or share the join link: <code>${PUBLIC_HOST}/join</code></li>
+          <li>On your phone/tablet, scan the QR code or open the link</li>
+          <li>Click "Join Now" and allow camera/microphone permissions</li>
+          <li>The camera will automatically be assigned to the next available slot</li>
+          <li><strong>Keep the join page open</strong> during your show - closing it will disconnect</li>
+        </ol>
+      </div>
+
+      <div class="guide-section">
+        <h3>Adding Camera Feeds to OBS</h3>
+        <ol>
+          <li>In OBS, add a new <strong>Browser Source</strong></li>
+          <li>Go to the Control page and find the slot you want to use</li>
+          <li>Click the <strong>"Copy Link"</strong> button next to the slot</li>
+          <li>Paste the URL into the OBS Browser Source settings</li>
+          <li>Set width to <code>1920</code> and height to <code>1080</code> (or your desired resolution)</li>
+          <li>Click OK - the camera feed will appear automatically when someone connects to that slot!</li>
+        </ol>
+        <p><strong>Pro tip:</strong> Set up all your slots in OBS once, and you never need to change the URLs again!</p>
+      </div>
+
+      <div class="guide-section">
+        <h3>Managing Slots</h3>
+        <p><strong>Configure Total Slots:</strong> You can set how many camera slots are available (1-50). Go to the Control page and adjust the "Total Slots" setting.</p>
+        <p><strong>Clear a Slot:</strong> If a camera disconnects improperly, click the "Clear" button next to that slot.</p>
+        <p><strong>View Slot Status:</strong> Active slots show a green "Active" badge. Empty slots show grey "Empty".</p>
+      </div>
+
+      <div class="guide-section">
+        <h3>Troubleshooting</h3>
+        <p><strong>Camera not showing up in OBS:</strong></p>
+        <ul style="margin-left:20px;line-height:2">
+          <li>Make sure the phone has an active internet connection</li>
+          <li>Check that the join page is still open on the phone</li>
+          <li>Try refreshing the OBS browser source</li>
+          <li>Check the Debug page for errors</li>
+        </ul>
+        <p><strong>Slot doesn't clear automatically:</strong> Slots auto-clear after 8 seconds of inactivity. You can manually clear them using the "Clear" button.</p>
+        <p><strong>Audio issues:</strong> Cameras join muted by default. Audio is transmitted to OBS but not back to the camera.</p>
+      </div>
+
+      <div class="guide-section">
+        <h3>Network Page</h3>
+        <p>View all devices connected to your network (192.168.8.x range). Useful for identifying which device is which.</p>
+      </div>
+
+      <div class="guide-section">
+        <h3>Debug Page</h3>
+        <p>View service logs and system errors. Check here if something isn't working correctly.</p>
+      </div>
+    </div>
+    <script>
+    async function updateSystemInfo(){
+      try{
+        const info=await fetch('/api/system').then(r=>r.json());
+        document.getElementById('cpu').textContent=info.cpuUsage||'N/A';
+        document.getElementById('ram').textContent=info.memPercent||'N/A';
+        document.getElementById('temp').textContent=info.temperature||'N/A';
+        document.getElementById('disk').textContent=info.diskPercent||'N/A';
+        document.getElementById('disk-avail').textContent=info.diskAvailable||'N/A';
+        document.getElementById('net-rx').textContent=info.networkRx||'N/A';
+        document.getElementById('net-tx').textContent=info.networkTx||'N/A';
+        document.getElementById('uptime').textContent=info.uptime||'N/A';
+      }catch(e){}
+    }
+    updateSystemInfo();
+    setInterval(updateSystemInfo,5000);
+    </script>
+  `;
+  res.send(dashboardLayout('Guide',content));
 });
 
 setInterval(()=>{
