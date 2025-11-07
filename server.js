@@ -79,7 +79,7 @@ document.getElementById("go").onclick=async()=>{
   const j=await r.json(); if(!j.ok){w.close();return alert("All slots full");}
   const n=j.slot;
   w.location="${VDO}/?push="+encodeURIComponent(streamId)
-             +"&room=${ROOM}&label=cam"+n+"&bitrate=2500&codec=h264&autostart=1&webcam&cleanish=1";
+             +"&label=cam"+n+"&bitrate=2500&codec=h264&autostart&webcam";
   document.getElementById("msg").innerText="Connected. Keep this tab open.";
 };
 </script></body></html>`);
