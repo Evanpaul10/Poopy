@@ -5,6 +5,7 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const QRCode = require("qrcode");
+const session = require("express-session");
 
 const app = express();
 const server = http.createServer(app);
@@ -18,14 +19,38 @@ const ROOM = "MERIMAC";
 const INACTIVITY_MS = 8_000;  // Clear inactive slots after 8 seconds
 const GRACE_MS = 5_000;        // 5 second grace period on initial connection
 
+// Authentication credentials
+const AUTH_USERNAME = "Admin";
+const AUTH_PASSWORD = "Cameldog99#";
+const RESET_PIN = "898989";
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Session middleware
+app.use(session({
+  secret: 'merimac-bridge-secret-key-change-in-production',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: false, // Set to true if using HTTPS directly (Cloudflare tunnel handles this)
+    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+  }
+}));
 
 const SLOTS = {};
 for(let i=1;i<=50;i++)SLOTS[i]=null;
 const deviceIndex = new Map();
 
 let MAX_SLOTS = 5; // Default to 5, configurable via API
+
+// Authentication middleware
+function requireAuth(req, res, next) {
+  if (req.session && req.session.authenticated) {
+    return next();
+  }
+  res.redirect('/login');
+}
 
 function now(){return Date.now();}
 function firstFree(){for(let i=1;i<=MAX_SLOTS;i++) if(!SLOTS[i]) return i; return null;}
@@ -39,8 +64,147 @@ function claim(streamId,label){
 function clearSlot(n){if(SLOTS[n]){deviceIndex.delete(SLOTS[n].streamId);SLOTS[n]=null;}}
 function clearById(id){const n=deviceIndex.get(id);if(!n)return;deviceIndex.delete(id);SLOTS[n]=null;return true;}
 
+// Login page
+app.get("/login", (req, res) => {
+  if (req.session && req.session.authenticated) {
+    return res.redirect('/control');
+  }
+  const error = req.query.error;
+  res.send(`<!doctype html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Login - Merimac Bridge</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);
+    color:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+  .login-container{background:#1a1a2e;border-radius:16px;padding:40px;max-width:400px;width:100%;
+    box-shadow:0 20px 60px rgba(0,0,0,0.4)}
+  h1{text-align:center;margin-bottom:10px;font-size:2em;color:#fff}
+  .subtitle{text-align:center;color:#888;margin-bottom:30px}
+  .form-group{margin-bottom:20px}
+  label{display:block;margin-bottom:8px;color:#e0e0e0;font-weight:500}
+  input{width:100%;padding:12px 16px;background:#252540;border:2px solid #667eea;
+    color:#fff;border-radius:8px;font-size:1em;transition:all 0.2s}
+  input:focus{outline:none;border-color:#764ba2}
+  .btn-login{width:100%;background:#667eea;color:#fff;border:none;padding:14px;
+    border-radius:8px;font-size:1.1em;font-weight:600;cursor:pointer;transition:all 0.3s;
+    margin-top:10px}
+  .btn-login:hover{background:#764ba2;transform:translateY(-2px);box-shadow:0 10px 30px rgba(102,126,234,0.4)}
+  .btn-login:active{transform:translateY(0)}
+  .error{background:#ef4444;color:#fff;padding:12px;border-radius:8px;margin-bottom:20px;text-align:center}
+  .forgot-link{text-align:center;margin-top:20px}
+  .forgot-link a{color:#667eea;text-decoration:none;font-weight:500}
+  .forgot-link a:hover{text-decoration:underline}
+</style>
+</head><body>
+<div class="login-container">
+  <h1>🔒 Merimac Bridge</h1>
+  <p class="subtitle">Admin Login</p>
+  ${error ? '<div class="error">Invalid username or password</div>' : ''}
+  <form method="POST" action="/login">
+    <div class="form-group">
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username" required autofocus>
+    </div>
+    <div class="form-group">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" required>
+    </div>
+    <button type="submit" class="btn-login">Login</button>
+  </form>
+  <div class="forgot-link">
+    <a href="/forgot-password">Forgot Password?</a>
+  </div>
+</div>
+</body></html>`);
+});
+
+// Login POST
+app.post("/login", (req, res) => {
+  const { username, password } = req.body;
+  if (username === AUTH_USERNAME && password === AUTH_PASSWORD) {
+    req.session.authenticated = true;
+    req.session.username = username;
+    res.redirect('/control');
+  } else {
+    res.redirect('/login?error=1');
+  }
+});
+
+// Logout
+app.get("/logout", (req, res) => {
+  req.session.destroy();
+  res.redirect('/login');
+});
+
+// Forgot password page
+app.get("/forgot-password", (req, res) => {
+  const error = req.query.error;
+  const success = req.query.success;
+  res.send(`<!doctype html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Reset Password - Merimac Bridge</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);
+    color:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+  .login-container{background:#1a1a2e;border-radius:16px;padding:40px;max-width:400px;width:100%;
+    box-shadow:0 20px 60px rgba(0,0,0,0.4)}
+  h1{text-align:center;margin-bottom:10px;font-size:2em;color:#fff}
+  .subtitle{text-align:center;color:#888;margin-bottom:30px}
+  .form-group{margin-bottom:20px}
+  label{display:block;margin-bottom:8px;color:#e0e0e0;font-weight:500}
+  input{width:100%;padding:12px 16px;background:#252540;border:2px solid #667eea;
+    color:#fff;border-radius:8px;font-size:1em;transition:all 0.2s}
+  input:focus{outline:none;border-color:#764ba2}
+  .btn-reset{width:100%;background:#667eea;color:#fff;border:none;padding:14px;
+    border-radius:8px;font-size:1.1em;font-weight:600;cursor:pointer;transition:all 0.3s;
+    margin-top:10px}
+  .btn-reset:hover{background:#764ba2;transform:translateY(-2px);box-shadow:0 10px 30px rgba(102,126,234,0.4)}
+  .btn-reset:active{transform:translateY(0)}
+  .error{background:#ef4444;color:#fff;padding:12px;border-radius:8px;margin-bottom:20px;text-align:center}
+  .success{background:#10b981;color:#fff;padding:12px;border-radius:8px;margin-bottom:20px;text-align:center}
+  .back-link{text-align:center;margin-top:20px}
+  .back-link a{color:#667eea;text-decoration:none;font-weight:500}
+  .back-link a:hover{text-decoration:underline}
+  .info{background:rgba(102,126,234,0.2);color:#e0e0e0;padding:12px;border-radius:8px;
+    margin-bottom:20px;text-align:center;font-size:0.9em}
+</style>
+</head><body>
+<div class="login-container">
+  <h1>🔑 Reset Password</h1>
+  <p class="subtitle">Enter PIN to view credentials</p>
+  ${error ? '<div class="error">Invalid PIN</div>' : ''}
+  ${success ? `<div class="success">Username: <strong>Admin</strong><br>Password: <strong>Cameldog99#</strong></div>` : ''}
+  ${!success ? `<form method="POST" action="/forgot-password">
+    <div class="info">Enter the 6-digit PIN to retrieve your login credentials</div>
+    <div class="form-group">
+      <label for="pin">Security PIN</label>
+      <input type="text" id="pin" name="pin" pattern="[0-9]{6}" maxlength="6" required autofocus placeholder="000000">
+    </div>
+    <button type="submit" class="btn-reset">Retrieve Credentials</button>
+  </form>` : ''}
+  <div class="back-link">
+    <a href="/login">← Back to Login</a>
+  </div>
+</div>
+</body></html>`);
+});
+
+// Forgot password POST
+app.post("/forgot-password", (req, res) => {
+  const { pin } = req.body;
+  if (pin === RESET_PIN) {
+    res.redirect('/forgot-password?success=1');
+  } else {
+    res.redirect('/forgot-password?error=1');
+  }
+});
+
 app.get("/api/state",(r,s)=>s.json({slots:SLOTS,maxSlots:MAX_SLOTS}));
-app.post("/api/config",(r,s)=>{
+app.post("/api/config",requireAuth,(r,s)=>{
   const {maxSlots}=r.body||{};
   if(maxSlots&&maxSlots>=1&&maxSlots<=50){
     MAX_SLOTS=maxSlots;
@@ -66,12 +230,12 @@ app.post("/api/leave",(r,s)=>{
   const id=(r.body?.streamId||"").replace(/[^a-zA-Z0-9]/g,"");
   const c=clearById(id); if(c)io.emit("state",{slots:SLOTS}); s.json({ok:!!c});
 });
-app.post("/api/clear/:n",(r,s)=>{
+app.post("/api/clear/:n",requireAuth,(r,s)=>{
   const n=+r.params.n; clearSlot(n); io.emit("state",{slots:SLOTS}); s.json({ok:true});
 });
 app.get("/health",(r,s)=>s.json({ok:true,active:Object.values(SLOTS).filter(Boolean).length}));
 
-app.get("/api/system",async(r,s)=>{
+app.get("/api/system",requireAuth,async(r,s)=>{
   const {exec}=require("child_process");
   const util=require("util");
   const execAsync=util.promisify(exec);
@@ -146,7 +310,7 @@ app.get("/api/system",async(r,s)=>{
   }
 });
 
-app.get("/api/network",async(r,s)=>{
+app.get("/api/network",requireAuth,async(r,s)=>{
   const {exec}=require("child_process");
   const util=require("util");
   const execAsync=util.promisify(exec);
@@ -271,7 +435,7 @@ app.get("/api/network",async(r,s)=>{
   }
 });
 
-app.get("/api/logs",async(r,s)=>{
+app.get("/api/logs",requireAuth,async(r,s)=>{
   const {exec}=require("child_process");
   const util=require("util");
   const execAsync=util.promisify(exec);
@@ -376,6 +540,9 @@ function dashboardLayout(pageName,content){
   <a href="/network" class="nav-item ${pageName==='Network'?'active':''}">Network</a>
   <a href="/debug" class="nav-item ${pageName==='Debug'?'active':''}">Debug</a>
   <a href="/guide" class="nav-item ${pageName==='Guide'?'active':''}">Guide</a>
+  <div style="margin-top:auto;padding-top:20px;border-top:1px solid #2a2a3e">
+    <a href="/logout" class="nav-item" style="color:#ef4444">Logout</a>
+  </div>
 </div>
 <div class="main-content">
   <div class="container">
@@ -496,7 +663,7 @@ setInterval(poll,2000);  // Poll every 2 seconds for faster updates
 </script></body></html>`);
 });
 
-app.get("/control",async(req,res)=>{
+app.get("/control",requireAuth,async(req,res)=>{
   const qr=await QRCode.toDataURL(`${PUBLIC_HOST}/join`);
   // Only show rows up to MAX_SLOTS
   const rows=[];
@@ -674,7 +841,7 @@ app.get("/control",async(req,res)=>{
 });
 
 // Network page
-app.get("/network",async(req,res)=>{
+app.get("/network",requireAuth,async(req,res)=>{
   const content=`
     <div class="header">
       <div class="system-compact" id="system-info-compact">
@@ -790,7 +957,7 @@ app.get("/network",async(req,res)=>{
 });
 
 // Debug page
-app.get("/debug",async(req,res)=>{
+app.get("/debug",requireAuth,async(req,res)=>{
   const content=`
     <div class="header">
       <div class="system-compact" id="system-info-compact">
@@ -852,7 +1019,7 @@ app.get("/debug",async(req,res)=>{
 });
 
 // Guide page
-app.get("/guide",async(req,res)=>{
+app.get("/guide",requireAuth,async(req,res)=>{
   const content=`
     <div class="header">
       <div class="system-compact" id="system-info-compact">
