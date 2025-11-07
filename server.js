@@ -15,8 +15,8 @@ const PUBLIC_HOST = "https://bridge.merimac.ca";
 const VDO = "https://vdo.ninja";
 const ROOM = "MERIMAC";
 
-const INACTIVITY_MS = 12_000;
-const GRACE_MS = 7_000;
+const INACTIVITY_MS = 8_000;  // Clear inactive slots after 8 seconds
+const GRACE_MS = 5_000;        // 5 second grace period on initial connection
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -63,15 +63,36 @@ app.get("/join",(req,res)=>{
   res.send(`<!doctype html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Join Camera</title>
-<style>body{background:#000;color:#fff;font-family:system-ui;text-align:center;padding:2em}</style>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);
+    color:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+  .container{text-align:center;max-width:400px;width:100%}
+  h1{font-size:2.5em;margin-bottom:0.3em;font-weight:700}
+  .subtitle{font-size:1.1em;opacity:0.9;margin-bottom:2em}
+  #go{background:#fff;color:#667eea;border:none;border-radius:50px;
+    font-size:1.3em;font-weight:600;padding:18px 50px;cursor:pointer;
+    box-shadow:0 10px 30px rgba(0,0,0,0.3);transition:all 0.3s ease;
+    width:100%;max-width:300px;touch-action:manipulation}
+  #go:hover{transform:translateY(-2px);box-shadow:0 15px 40px rgba(0,0,0,0.4)}
+  #go:active{transform:translateY(0)}
+  #msg{margin-top:2em;font-size:1em;opacity:0.8;line-height:1.6}
+  .status{display:inline-block;background:rgba(255,255,255,0.2);
+    padding:8px 20px;border-radius:20px;margin-top:1em}
+</style>
 </head><body>
-<h2>Join the Show</h2><button id="go">Join Now</button>
-<p id="msg">Keep this page open during the show.</p>
+<div class="container">
+  <h1>📹 Merimac Live</h1>
+  <p class="subtitle">Join the show as a camera</p>
+  <button id="go">Join Now</button>
+  <p id="msg">Tap the button above to get started</p>
+</div>
 <script>
 function id(){let i=localStorage.getItem("sid");if(!i){i=Math.random().toString(36).slice(2,12);localStorage.setItem("sid",i);}return i;}
 const streamId=id();
 async function post(u,b){return fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)});}
-setInterval(()=>post("/api/heartbeat",{streamId},true),7000);
+setInterval(()=>post("/api/heartbeat",{streamId},true),5000);
 window.addEventListener("pagehide",()=>post("/api/leave",{streamId},true));
 document.getElementById("go").onclick=async()=>{
   const w=window.open("about:blank","_blank");
@@ -80,7 +101,7 @@ document.getElementById("go").onclick=async()=>{
   const n=j.slot;
   w.location="${VDO}/?push="+encodeURIComponent(streamId)
              +"&label=cam"+n+"&bitrate=2500&codec=h264&autostart&webcam";
-  document.getElementById("msg").innerText="Connected. Keep this tab open.";
+  document.getElementById("msg").innerHTML='<div class="status">✅ Connected as Camera '+n+'</div><br>Keep this page open during the show';
 };
 </script></body></html>`);
 });
@@ -145,7 +166,7 @@ async function poll(){
 poll();
 const io_=io();
 io_.on("state",poll);
-setInterval(poll,5000);
+setInterval(poll,2000);  // Poll every 2 seconds for faster updates
 </script></body></html>`);
 });
 
