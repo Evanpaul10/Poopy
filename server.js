@@ -223,11 +223,21 @@ app.get("/control",async(req,res)=>{
   .stat{text-align:center}
   .stat-value{font-size:2em;font-weight:700;color:#667eea}
   .stat-label{color:#888;font-size:0.9em;margin-top:5px}
+  .settings-box{margin-top:20px}
+  .settings-box h3{margin-bottom:15px}
+  .settings-row{display:flex;gap:20px;align-items:center;margin-bottom:15px}
+  .settings-row label{color:#e0e0e0;font-weight:500;min-width:100px}
+  .settings-row input{background:#252540;border:1px solid #667eea;color:#fff;
+    padding:8px 12px;border-radius:6px;width:80px;font-size:1em}
+  .settings-row input:focus{outline:none;border-color:#764ba2}
+  .btn-apply{background:#667eea;color:#fff;border:none;padding:8px 20px;
+    border-radius:6px;cursor:pointer;font-weight:500;transition:all 0.2s}
+  .btn-apply:hover{background:#764ba2;transform:translateY(-1px)}
 </style>
 </head><body>
 <div class="container">
   <div class="header">
-    <h1>🎬 Melmac Video Ninja Bridge Control</h1>
+    <h1>Merimac Video Ninja Bridge</h1>
     <p class="subtitle">Live camera management dashboard</p>
   </div>
   <div class="grid">
@@ -243,9 +253,21 @@ app.get("/control",async(req,res)=>{
           <div class="stat-label">Active</div>
         </div>
         <div class="stat">
-          <div class="stat-value">5</div>
+          <div class="stat-value" id="total-slots">5</div>
           <div class="stat-label">Total Slots</div>
         </div>
+      </div>
+      <div class="settings-box">
+        <h3>Slot Configuration</h3>
+        <div class="settings-row">
+          <label>Min Slot:</label>
+          <input type="number" id="min-slot" value="1" min="1" max="5">
+        </div>
+        <div class="settings-row">
+          <label>Max Slot:</label>
+          <input type="number" id="max-slot" value="5" min="1" max="5">
+        </div>
+        <button class="btn-apply" onclick="applySettings()">Apply</button>
       </div>
     </div>
     <div class="card">
@@ -256,12 +278,34 @@ app.get("/control",async(req,res)=>{
 </div>
 <script src="/socket.io/socket.io.js"></script>
 <script>
+let minSlot=parseInt(localStorage.getItem('minSlot')||'1');
+let maxSlot=parseInt(localStorage.getItem('maxSlot')||'5');
+
+function loadSettings(){
+  document.getElementById('min-slot').value=minSlot;
+  document.getElementById('max-slot').value=maxSlot;
+  document.getElementById('total-slots').textContent=maxSlot-minSlot+1;
+}
+
+function applySettings(){
+  const min=parseInt(document.getElementById('min-slot').value);
+  const max=parseInt(document.getElementById('max-slot').value);
+  if(min>max){alert('Min slot must be less than or equal to max slot');return;}
+  if(min<1||max>5){alert('Slots must be between 1 and 5');return;}
+  minSlot=min;
+  maxSlot=max;
+  localStorage.setItem('minSlot',min);
+  localStorage.setItem('maxSlot',max);
+  document.getElementById('total-slots').textContent=maxSlot-minSlot+1;
+  refresh();
+}
+
 async function clearSlot(n){await fetch('/api/clear/'+n,{method:'POST'});refresh();}
 async function refresh(){
   const j=await fetch('/api/state').then(r=>r.json());
   let h='<tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>View</th><th>Action</th></tr>';
   let activeCount=0;
-  for(let i=1;i<=5;i++){
+  for(let i=minSlot;i<=maxSlot;i++){
     const s=j.slots[i];
     if(s)activeCount++;
     const status=s?'<span class="badge active">Active</span>':'<span class="badge empty">Empty</span>';
@@ -278,6 +322,7 @@ async function refresh(){
   document.getElementById('t').innerHTML=h;
   document.getElementById('active-count').textContent=activeCount;
 }
+loadSettings();
 io().on('state',refresh);
 </script></body></html>`);
 });
