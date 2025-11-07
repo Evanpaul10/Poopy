@@ -171,7 +171,7 @@ setInterval(poll,2000);  // Poll every 2 seconds for faster updates
 });
 
 app.get("/control",async(req,res)=>{
-  const qr=await QRCode.toDataURL(`${PUBLIC_HOST}/join`,{color:{dark:"#667eea",light:"#ffffff"}});
+  const qr=await QRCode.toDataURL(`${PUBLIC_HOST}/join`);
   const rows=Object.entries(SLOTS).map(([n,s])=>{
     const status=s?'<span class="badge active">Active</span>':'<span class="badge empty">Empty</span>';
     const id=s?s.streamId:'-';
@@ -199,7 +199,9 @@ app.get("/control",async(req,res)=>{
   .card{background:#1a1a2e;border-radius:12px;padding:25px;box-shadow:0 4px 20px rgba(0,0,0,0.3)}
   .qr-card{text-align:center}
   .qr-card img{border-radius:8px;background:#fff;padding:15px;margin-bottom:15px}
-  .qr-card a{color:#667eea;text-decoration:none;font-weight:500;word-break:break-all}
+  .qr-card .link-container{margin:15px auto;max-width:280px}
+  .qr-card a{color:#667eea;text-decoration:none;font-weight:500;display:block;
+    word-wrap:break-word;overflow-wrap:break-word;line-height:1.4}
   .qr-card a:hover{text-decoration:underline}
   table{width:100%;border-collapse:collapse}
   th{background:#252540;color:#fff;padding:12px;text-align:left;font-weight:600;border-bottom:2px solid #667eea}
@@ -225,14 +227,16 @@ app.get("/control",async(req,res)=>{
 </head><body>
 <div class="container">
   <div class="header">
-    <h1>🎬 Merimac Bridge Control</h1>
+    <h1>🎬 Melmac Video Ninja Bridge Control</h1>
     <p class="subtitle">Live camera management dashboard</p>
   </div>
   <div class="grid">
     <div class="card qr-card">
       <h3 style="margin-bottom:15px">Join Code</h3>
       <img src="${qr}" width="200">
-      <a href="${PUBLIC_HOST}/join" target="_blank">${PUBLIC_HOST}/join</a>
+      <div class="link-container">
+        <a href="${PUBLIC_HOST}/join" target="_blank">${PUBLIC_HOST}/join</a>
+      </div>
       <div class="stats">
         <div class="stat">
           <div class="stat-value" id="active-count">0</div>
