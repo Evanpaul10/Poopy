@@ -64,6 +64,11 @@ function claim(streamId,label){
 function clearSlot(n){if(SLOTS[n]){deviceIndex.delete(SLOTS[n].streamId);SLOTS[n]=null;}}
 function clearById(id){const n=deviceIndex.get(id);if(!n)return;deviceIndex.delete(id);SLOTS[n]=null;return true;}
 
+// Root route - redirect to control page
+app.get("/", (req, res) => {
+  res.redirect('/control');
+});
+
 // Login page
 app.get("/login", (req, res) => {
   if (req.session && req.session.authenticated) {
