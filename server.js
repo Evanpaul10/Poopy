@@ -110,8 +110,8 @@ function render(id){
   if(!id){wrap.innerHTML='<div class="waiting">Waiting for camera ${n}…</div>';return;}
 
   let url="${VDO}/?view="+encodeURIComponent(id)
-          +"&room=${ROOM}&cleanoutput&stats=0&scale=cover&audiobitrate=128&autostart";
-  if(!isOBS())url+="&muted";
+          +"&cleanoutput=1&stats=0&scene&autostart=1&coverview";
+  if(!isOBS())url+="&muted=1";
 
   const f=document.createElement("iframe");
   f.allow="autoplay; camera; microphone; fullscreen; display-capture; encrypted-media; picture-in-picture";
