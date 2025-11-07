@@ -21,11 +21,14 @@ const GRACE_MS = 5_000;        // 5 second grace period on initial connection
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-const SLOTS = { 1:null,2:null,3:null,4:null,5:null };
+const SLOTS = {};
+for(let i=1;i<=50;i++)SLOTS[i]=null;
 const deviceIndex = new Map();
 
+let MAX_SLOTS = 5; // Default to 5, configurable via API
+
 function now(){return Date.now();}
-function firstFree(){for(let i=1;i<=5;i++) if(!SLOTS[i]) return i; return null;}
+function firstFree(){for(let i=1;i<=MAX_SLOTS;i++) if(!SLOTS[i]) return i; return null;}
 function claim(streamId,label){
   const id=String(streamId).replace(/[^a-zA-Z0-9]/g,"");
   if(deviceIndex.has(id)){const n=deviceIndex.get(id);SLOTS[n].last=now();return n;}
@@ -36,7 +39,16 @@ function claim(streamId,label){
 function clearSlot(n){if(SLOTS[n]){deviceIndex.delete(SLOTS[n].streamId);SLOTS[n]=null;}}
 function clearById(id){const n=deviceIndex.get(id);if(!n)return;deviceIndex.delete(id);SLOTS[n]=null;return true;}
 
-app.get("/api/state",(r,s)=>s.json({slots:SLOTS}));
+app.get("/api/state",(r,s)=>s.json({slots:SLOTS,maxSlots:MAX_SLOTS}));
+app.post("/api/config",(r,s)=>{
+  const {maxSlots}=r.body||{};
+  if(maxSlots&&maxSlots>=1&&maxSlots<=50){
+    MAX_SLOTS=maxSlots;
+    s.json({ok:true,maxSlots:MAX_SLOTS});
+  }else{
+    s.json({ok:false,error:"maxSlots must be between 1 and 50"});
+  }
+});
 app.post("/api/claim",(r,s)=>{
   const {streamId,label}=r.body||{};
   if(!streamId)return s.json({ok:false});
@@ -58,6 +70,63 @@ app.post("/api/clear/:n",(r,s)=>{
   const n=+r.params.n; clearSlot(n); io.emit("state",{slots:SLOTS}); s.json({ok:true});
 });
 app.get("/health",(r,s)=>s.json({ok:true,active:Object.values(SLOTS).filter(Boolean).length}));
+
+app.get("/api/system",async(r,s)=>{
+  const {exec}=require("child_process");
+  const util=require("util");
+  const execAsync=util.promisify(exec);
+
+  try{
+    const info={};
+
+    // CPU usage
+    try{
+      const {stdout:top}=await execAsync("top -bn1 | grep 'Cpu(s)'");
+      const match=top.match(/(\d+\.\d+)\s*id/);
+      if(match)info.cpuUsage=(100-parseFloat(match[1])).toFixed(1)+'%';
+      else info.cpuUsage='N/A';
+    }catch(e){info.cpuUsage='N/A';}
+
+    // Memory usage
+    try{
+      const {stdout:mem}=await execAsync("free -m | grep Mem");
+      const parts=mem.split(/\s+/);
+      const total=parseInt(parts[1]);
+      const used=parseInt(parts[2]);
+      info.memUsage=`${used}MB / ${total}MB`;
+      info.memPercent=((used/total)*100).toFixed(1)+'%';
+    }catch(e){info.memUsage='N/A';info.memPercent='N/A';}
+
+    // Temperature (Raspberry Pi specific)
+    try{
+      const {stdout:temp}=await execAsync("vcgencmd measure_temp");
+      info.temperature=temp.replace("temp=","").trim();
+    }catch(e){
+      try{
+        const {stdout:temp2}=await execAsync("cat /sys/class/thermal/thermal_zone0/temp");
+        info.temperature=(parseInt(temp2)/1000).toFixed(1)+"°C";
+      }catch(e2){info.temperature='N/A';}
+    }
+
+    // Uptime
+    try{
+      const {stdout:uptime}=await execAsync("uptime -p");
+      info.uptime=uptime.replace("up ","").trim();
+    }catch(e){info.uptime='N/A';}
+
+    // Disk usage
+    try{
+      const {stdout:disk}=await execAsync("df -h / | tail -1");
+      const parts=disk.split(/\s+/);
+      info.diskUsage=`${parts[2]} / ${parts[1]}`;
+      info.diskPercent=parts[4];
+    }catch(e){info.diskUsage='N/A';info.diskPercent='N/A';}
+
+    s.json(info);
+  }catch(e){
+    s.json({error:e.message});
+  }
+});
 
 app.get("/join",(req,res)=>{
   res.send(`<!doctype html><html><head>
@@ -196,6 +265,7 @@ app.get("/control",async(req,res)=>{
   .container{max-width:1200px;margin:0 auto}
   .grid{display:grid;grid-template-columns:1fr 2fr;gap:30px;margin-bottom:30px}
   @media(max-width:768px){.grid{grid-template-columns:1fr}}
+  .grid-full{display:grid;grid-template-columns:1fr;gap:30px;margin-bottom:30px}
   .card{background:#1a1a2e;border-radius:12px;padding:25px;box-shadow:0 4px 20px rgba(0,0,0,0.3)}
   .qr-card{text-align:center}
   .qr-card img{border-radius:8px;background:#fff;padding:15px;margin-bottom:15px}
@@ -223,16 +293,21 @@ app.get("/control",async(req,res)=>{
   .stat{text-align:center}
   .stat-value{font-size:2em;font-weight:700;color:#667eea}
   .stat-label{color:#888;font-size:0.9em;margin-top:5px}
-  .settings-box{margin-top:20px}
-  .settings-box h3{margin-bottom:15px}
-  .settings-row{display:flex;gap:20px;align-items:center;margin-bottom:15px}
-  .settings-row label{color:#e0e0e0;font-weight:500;min-width:100px}
+  .settings-box{margin-top:20px;padding-top:20px;border-top:1px solid #2a2a3e}
+  .settings-box h3{margin-bottom:15px;font-size:1em}
+  .settings-row{display:flex;gap:15px;align-items:center;margin-bottom:15px}
+  .settings-row label{color:#e0e0e0;font-weight:500;flex:1}
   .settings-row input{background:#252540;border:1px solid #667eea;color:#fff;
-    padding:8px 12px;border-radius:6px;width:80px;font-size:1em}
+    padding:8px 12px;border-radius:6px;width:100px;font-size:1em}
   .settings-row input:focus{outline:none;border-color:#764ba2}
   .btn-apply{background:#667eea;color:#fff;border:none;padding:8px 20px;
-    border-radius:6px;cursor:pointer;font-weight:500;transition:all 0.2s}
+    border-radius:6px;cursor:pointer;font-weight:500;transition:all 0.2s;width:100%}
   .btn-apply:hover{background:#764ba2;transform:translateY(-1px)}
+  .system-info{display:grid;grid-template-columns:1fr 1fr;gap:15px}
+  @media(max-width:768px){.system-info{grid-template-columns:1fr}}
+  .info-item{background:#252540;padding:15px;border-radius:8px}
+  .info-label{color:#888;font-size:0.85em;margin-bottom:5px}
+  .info-value{color:#fff;font-size:1.1em;font-weight:600}
 </style>
 </head><body>
 <div class="container">
@@ -260,12 +335,8 @@ app.get("/control",async(req,res)=>{
       <div class="settings-box">
         <h3>Slot Configuration</h3>
         <div class="settings-row">
-          <label>Min Slot:</label>
-          <input type="number" id="min-slot" value="1" min="1" max="5">
-        </div>
-        <div class="settings-row">
-          <label>Max Slot:</label>
-          <input type="number" id="max-slot" value="5" min="1" max="5">
+          <label>Total Slots:</label>
+          <input type="number" id="total-slots-input" value="5" min="1" max="50">
         </div>
         <button class="btn-apply" onclick="applySettings()">Apply</button>
       </div>
@@ -275,37 +346,56 @@ app.get("/control",async(req,res)=>{
       <table id="t"><tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>View</th><th>Action</th></tr>${rows}</table>
     </div>
   </div>
+  <div class="grid-full">
+    <div class="card">
+      <h3 style="margin-bottom:20px">System Information</h3>
+      <div class="system-info" id="system-info">
+        <div class="info-item"><div class="info-label">CPU Usage</div><div class="info-value">Loading...</div></div>
+        <div class="info-item"><div class="info-label">Memory</div><div class="info-value">Loading...</div></div>
+        <div class="info-item"><div class="info-label">Temperature</div><div class="info-value">Loading...</div></div>
+        <div class="info-item"><div class="info-label">Uptime</div><div class="info-value">Loading...</div></div>
+        <div class="info-item"><div class="info-label">Disk Usage</div><div class="info-value">Loading...</div></div>
+      </div>
+    </div>
+  </div>
 </div>
 <script src="/socket.io/socket.io.js"></script>
 <script>
-let minSlot=parseInt(localStorage.getItem('minSlot')||'1');
-let maxSlot=parseInt(localStorage.getItem('maxSlot')||'5');
+let maxSlots=5;
 
-function loadSettings(){
-  document.getElementById('min-slot').value=minSlot;
-  document.getElementById('max-slot').value=maxSlot;
-  document.getElementById('total-slots').textContent=maxSlot-minSlot+1;
+async function loadSettings(){
+  const j=await fetch('/api/state').then(r=>r.json());
+  maxSlots=j.maxSlots||5;
+  document.getElementById('total-slots-input').value=maxSlots;
+  document.getElementById('total-slots').textContent=maxSlots;
 }
 
-function applySettings(){
-  const min=parseInt(document.getElementById('min-slot').value);
-  const max=parseInt(document.getElementById('max-slot').value);
-  if(min>max){alert('Min slot must be less than or equal to max slot');return;}
-  if(min<1||max>5){alert('Slots must be between 1 and 5');return;}
-  minSlot=min;
-  maxSlot=max;
-  localStorage.setItem('minSlot',min);
-  localStorage.setItem('maxSlot',max);
-  document.getElementById('total-slots').textContent=maxSlot-minSlot+1;
-  refresh();
+async function applySettings(){
+  const total=parseInt(document.getElementById('total-slots-input').value);
+  if(total<1||total>50){alert('Total slots must be between 1 and 50');return;}
+  const res=await fetch('/api/config',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({maxSlots:total})
+  });
+  const j=await res.json();
+  if(j.ok){
+    maxSlots=j.maxSlots;
+    document.getElementById('total-slots').textContent=maxSlots;
+    refresh();
+  }else{
+    alert(j.error||'Failed to update settings');
+  }
 }
 
 async function clearSlot(n){await fetch('/api/clear/'+n,{method:'POST'});refresh();}
+
 async function refresh(){
   const j=await fetch('/api/state').then(r=>r.json());
+  maxSlots=j.maxSlots||maxSlots;
   let h='<tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>View</th><th>Action</th></tr>';
   let activeCount=0;
-  for(let i=minSlot;i<=maxSlot;i++){
+  for(let i=1;i<=maxSlots;i++){
     const s=j.slots[i];
     if(s)activeCount++;
     const status=s?'<span class="badge active">Active</span>':'<span class="badge empty">Empty</span>';
@@ -322,14 +412,37 @@ async function refresh(){
   document.getElementById('t').innerHTML=h;
   document.getElementById('active-count').textContent=activeCount;
 }
+
+async function updateSystemInfo(){
+  try{
+    const info=await fetch('/api/system').then(r=>r.json());
+    const items=[
+      {label:'CPU Usage',value:info.cpuUsage||'N/A'},
+      {label:'Memory',value:info.memPercent?info.memUsage+' ('+info.memPercent+')':info.memUsage||'N/A'},
+      {label:'Temperature',value:info.temperature||'N/A'},
+      {label:'Uptime',value:info.uptime||'N/A'},
+      {label:'Disk Usage',value:info.diskPercent?info.diskUsage+' ('+info.diskPercent+')':info.diskUsage||'N/A'}
+    ];
+    let html='';
+    items.forEach(item=>{
+      html+=\`<div class="info-item"><div class="info-label">\${item.label}</div><div class="info-value">\${item.value}</div></div>\`;
+    });
+    document.getElementById('system-info').innerHTML=html;
+  }catch(e){
+    console.error('Failed to fetch system info:',e);
+  }
+}
+
 loadSettings();
 io().on('state',refresh);
+updateSystemInfo();
+setInterval(updateSystemInfo,5000); // Update system info every 5 seconds
 </script></body></html>`);
 });
 
 setInterval(()=>{
   const t=now();let ch=false;
-  for(let i=1;i<=5;i++){
+  for(let i=1;i<=50;i++){
     const s=SLOTS[i];if(!s)continue;
     if(t-s.last>INACTIVITY_MS && t>s.grace){deviceIndex.delete(s.streamId);SLOTS[i]=null;ch=true;}
   }
