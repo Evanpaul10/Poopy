@@ -1167,6 +1167,10 @@ function render(id){
   const f=document.createElement("iframe");
   f.allow="autoplay; camera; microphone; fullscreen; display-capture; encrypted-media; picture-in-picture";
   f.setAttribute("allowfullscreen","");
+  f.style.width="100%";
+  f.style.height="100%";
+  f.style.border="0";
+  f.style.display="block";
   f.src=url;
 
   // Debug iframe load
@@ -1187,9 +1191,18 @@ function render(id){
       setTimeout(()=>{
         ov.remove();
         needsClick=false;
-        // Reload iframe to trigger autoplay after user interaction
-        f.src=f.src;
-        console.log("Reloading iframe with autoplay");
+        // Completely recreate the iframe with autoplay after user interaction
+        f.remove();
+        const newFrame=document.createElement("iframe");
+        newFrame.allow="autoplay; camera; microphone; fullscreen; display-capture; encrypted-media; picture-in-picture";
+        newFrame.setAttribute("allowfullscreen","");
+        newFrame.style.width="100%";
+        newFrame.style.height="100%";
+        newFrame.style.border="0";
+        newFrame.src=url;
+        newFrame.onload=()=>console.log("VDO.Ninja iframe reloaded after click");
+        wrap.appendChild(newFrame);
+        console.log("Recreated iframe with autoplay");
       },300);
     };
     wrap.appendChild(ov);
