@@ -1562,8 +1562,8 @@ html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:syste
 #grid.count-2,#grid.count-3,#grid.count-4{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
 #grid.count-5,#grid.count-6,#grid.count-7,#grid.count-8,#grid.count-9{grid-template-columns:1fr 1fr 1fr;grid-template-rows:1fr 1fr 1fr}
 #grid.count-10,#grid.count-11,#grid.count-12,#grid.count-13,#grid.count-14,#grid.count-15,#grid.count-16{grid-template-columns:1fr 1fr 1fr 1fr;grid-template-rows:1fr 1fr 1fr 1fr}
-.slot-container{position:relative;background:#111;overflow:hidden;min-height:150px;display:flex;align-items:center;justify-content:center}
-.slot-container iframe{width:100%;height:100%;border:0;display:block;object-fit:cover}
+.slot-container{position:relative;background:#111;overflow:hidden;min-height:150px}
+.slot-container iframe{position:absolute;top:0;left:0;width:100%;height:100%;border:0;display:block}
 .slot-label{position:absolute;top:5px;left:5px;background:rgba(0,0,0,0.7);color:#fff;padding:4px 10px;border-radius:4px;font-size:12px;z-index:100;font-weight:500}
 .waiting{color:#666;display:flex;align-items:center;justify-content:center;height:100%;font-size:14px}
 #overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);
@@ -1652,7 +1652,7 @@ function render(){
       waiting.textContent=\`Waiting for camera \${slotNum}...\`;
       container.appendChild(waiting);
     }else{
-      let url=\`${VDO}/?view=\${encodeURIComponent(streamId)}&cleanoutput=1&stats=0&scene&autostart=1&coverview&relay\`;
+      let url=\`${VDO}/?view=\${encodeURIComponent(streamId)}&cleanoutput=1&stats=0&scene&autostart=1&cover&relay\`;
       if(!isOBS())url+="&muted=1";
       console.log(\`Creating iframe for slot \${slotNum} with URL: \${url}\`);
 
@@ -1737,8 +1737,8 @@ html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:syste
 #grid.count-2,#grid.count-3,#grid.count-4{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
 #grid.count-5,#grid.count-6,#grid.count-7,#grid.count-8,#grid.count-9{grid-template-columns:1fr 1fr 1fr;grid-template-rows:1fr 1fr 1fr}
 #grid.count-10,#grid.count-11,#grid.count-12,#grid.count-13,#grid.count-14,#grid.count-15,#grid.count-16{grid-template-columns:1fr 1fr 1fr 1fr;grid-template-rows:1fr 1fr 1fr 1fr}
-.slot-container{position:relative;background:#111;overflow:hidden;min-height:150px;display:flex;align-items:center;justify-content:center}
-.slot-container iframe{width:100%;height:100%;border:0;display:block;object-fit:cover}
+.slot-container{position:relative;background:#111;overflow:hidden;min-height:150px}
+.slot-container iframe{position:absolute;top:0;left:0;width:100%;height:100%;border:0;display:block}
 .waiting{color:#666;display:flex;align-items:center;justify-content:center;height:100%;font-size:14px}
 #overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);
   display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:999;flex-direction:column;gap:15px}
@@ -1807,7 +1807,7 @@ function render(){
       waiting.textContent=\`Waiting for camera \${slotNum}...\`;
       container.appendChild(waiting);
     }else{
-      let url=\`${VDO}/?view=\${encodeURIComponent(streamId)}&cleanoutput=1&stats=0&scene&autostart=1&coverview&relay\`;
+      let url=\`${VDO}/?view=\${encodeURIComponent(streamId)}&cleanoutput=1&stats=0&scene&autostart=1&cover&relay\`;
       if(!isOBS())url+="&muted=1";
 
       const iframe=document.createElement("iframe");
