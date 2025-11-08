@@ -1164,6 +1164,13 @@ function render(id){
   console.log("Loading VDO.Ninja viewer for stream:",id);
   console.log("URL:",url);
 
+  // Add debug overlay at top
+  const debugDiv=document.createElement("div");
+  debugDiv.style.cssText="position:fixed;top:0;left:0;right:0;background:rgba(0,0,0,0.8);color:#0f0;padding:10px;font-family:monospace;font-size:12px;z-index:10000;max-width:100%;overflow:hidden;";
+  debugDiv.innerHTML=\`Stream: \${id.substring(0,20)}...<br>Network: \${window.location.hostname}\`;
+  wrap.appendChild(debugDiv);
+  setTimeout(()=>debugDiv.remove(),8000); // Remove after 8 sec
+
   const f=document.createElement("iframe");
   f.allow="autoplay; camera; microphone; fullscreen; display-capture; encrypted-media; picture-in-picture";
   f.setAttribute("allowfullscreen","");
@@ -1174,8 +1181,21 @@ function render(id){
   f.src=url;
 
   // Debug iframe load
-  f.onload=()=>console.log("VDO.Ninja iframe loaded");
-  f.onerror=(e)=>console.error("VDO.Ninja iframe error:",e);
+  f.onload=()=>{
+    console.log("VDO.Ninja iframe loaded");
+    const loadMsg=document.createElement("div");
+    loadMsg.style.cssText="position:fixed;bottom:10px;right:10px;background:rgba(0,255,0,0.8);color:#fff;padding:8px 15px;border-radius:5px;z-index:10001;font-size:14px;";
+    loadMsg.textContent="✅ Iframe loaded";
+    wrap.appendChild(loadMsg);
+    setTimeout(()=>loadMsg.remove(),3000);
+  };
+  f.onerror=(e)=>{
+    console.error("VDO.Ninja iframe error:",e);
+    const errMsg=document.createElement("div");
+    errMsg.style.cssText="position:fixed;bottom:10px;right:10px;background:rgba(255,0,0,0.9);color:#fff;padding:8px 15px;border-radius:5px;z-index:10001;font-size:14px;";
+    errMsg.textContent="❌ Iframe failed";
+    wrap.appendChild(errMsg);
+  };
 
   wrap.appendChild(f);
 
@@ -1199,8 +1219,23 @@ function render(id){
         newFrame.style.width="100%";
         newFrame.style.height="100%";
         newFrame.style.border="0";
+        newFrame.style.display="block";
         newFrame.src=url;
-        newFrame.onload=()=>console.log("VDO.Ninja iframe reloaded after click");
+        newFrame.onload=()=>{
+          console.log("VDO.Ninja iframe reloaded after click");
+          const reloadMsg=document.createElement("div");
+          reloadMsg.style.cssText="position:fixed;bottom:10px;right:10px;background:rgba(0,255,0,0.8);color:#fff;padding:8px 15px;border-radius:5px;z-index:10001;font-size:14px;";
+          reloadMsg.textContent="✅ Iframe reloaded";
+          wrap.appendChild(reloadMsg);
+          setTimeout(()=>reloadMsg.remove(),3000);
+        };
+        newFrame.onerror=(e)=>{
+          console.error("Reload error:",e);
+          const errMsg=document.createElement("div");
+          errMsg.style.cssText="position:fixed;bottom:10px;right:10px;background:rgba(255,0,0,0.9);color:#fff;padding:8px 15px;border-radius:5px;z-index:10001;font-size:14px;";
+          errMsg.textContent="❌ Reload failed";
+          wrap.appendChild(errMsg);
+        };
         wrap.appendChild(newFrame);
         console.log("Recreated iframe with autoplay");
       },300);
