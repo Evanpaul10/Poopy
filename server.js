@@ -1125,7 +1125,7 @@ document.getElementById("go").onclick=async()=>{
   if(!j.ok){w.close();return alert("All slots full");}
   const n=j.slot;
   const vdoUrl="${VDO}/?push="+encodeURIComponent(streamId)
-             +"&label=cam"+n+"&bitrate=${SETTINGS.bitrate}&codec=h264&autostart&webcam&muted&novideo=0&noaudio=0";
+             +"&label=cam"+n+"&bitrate=${SETTINGS.bitrate}&codec=h264&autostart&webcam&muted&relay";
   console.log("Opening VDO.Ninja pusher:",vdoUrl);
   w.location=vdoUrl;
   document.getElementById("msg").innerHTML='<div class="status">✅ Connected as Camera '+n+'</div><br>Keep this page open during the show';
@@ -1158,7 +1158,7 @@ function render(id){
   if(!id){wrap.innerHTML='<div class="waiting">Waiting for camera ${n}…</div>';return;}
 
   let url="${VDO}/?view="+encodeURIComponent(id)
-          +"&cleanoutput=1&stats=0&scene&autostart=1&coverview&novideo=0&noaudio=0";
+          +"&cleanoutput=1&stats=0&scene&autostart=1&coverview&relay";
   if(!isOBS())url+="&muted=1";
 
   console.log("Loading VDO.Ninja viewer for stream:",id);
