@@ -85,6 +85,53 @@ const loginAttempts = new Map(); // IP -> {count, lastAttempt, lockedUntil}
 // Track active slots for efficient cleanup
 const activeSlots = new Set();
 
+// Rate limiting storage
+const rateLimits = new Map(); // IP -> { claim: [], heartbeat: [], leave: [] }
+
+// Bandwidth tracking
+const bandwidthStats = {}; // slotNum -> { bytesTransferred, startTime, lastUpdate }
+
+// Rate limiting function
+function checkRateLimit(ip, endpoint, maxRequests, windowMs) {
+  if (!rateLimits.has(ip)) {
+    rateLimits.set(ip, { claim: [], heartbeat: [], leave: [] });
+  }
+
+  const now = Date.now();
+  const requests = rateLimits.get(ip)[endpoint];
+
+  // Remove old requests outside the window
+  while (requests.length > 0 && now - requests[0] > windowMs) {
+    requests.shift();
+  }
+
+  // Check if limit exceeded
+  if (requests.length >= maxRequests) {
+    return false;
+  }
+
+  // Add current request
+  requests.push(now);
+  return true;
+}
+
+// Cleanup old rate limit entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, endpoints] of rateLimits.entries()) {
+    let hasRecent = false;
+    for (const requests of Object.values(endpoints)) {
+      if (requests.length > 0 && now - requests[0] <= 60000) {
+        hasRecent = true;
+        break;
+      }
+    }
+    if (!hasRecent) {
+      rateLimits.delete(ip);
+    }
+  }
+}, 300000);
+
 // Load settings from file
 function loadSettings() {
   try {
@@ -194,8 +241,21 @@ loadCameras();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// HTTPS enforcement middleware (skip if behind Cloudflare or in dev)
+app.use((req, res, next) => {
+  // Skip if already HTTPS or if behind Cloudflare (which handles HTTPS)
+  if (req.secure || req.headers['x-forwarded-proto'] === 'https' || process.env.NODE_ENV === 'development') {
+    return next();
+  }
+
+  // Redirect to HTTPS
+  const httpsUrl = `https://${req.headers.host}${req.url}`;
+  console.log(`Redirecting HTTP to HTTPS: ${httpsUrl}`);
+  res.redirect(301, httpsUrl);
+});
+
 // Session middleware with secure secret
-app.use(session({
+const sessionMiddleware = session({
   secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
@@ -205,7 +265,12 @@ app.use(session({
     httpOnly: true,
     sameSite: 'lax'
   }
-}));
+});
+
+app.use(sessionMiddleware);
+
+// Share session with Socket.IO
+io.engine.use(sessionMiddleware);
 
 const SLOTS = {};
 for(let i=1;i<=50;i++)SLOTS[i]=null;
@@ -258,6 +323,14 @@ function claim(streamId, label) {
   };
   deviceIndex.set(id, n);
   activeSlots.add(n);
+
+  // Initialize bandwidth tracking
+  bandwidthStats[n] = {
+    bytesTransferred: 0,
+    startTime: now(),
+    lastUpdate: now()
+  };
+
   return n;
 }
 
@@ -266,6 +339,7 @@ function clearSlot(n) {
     deviceIndex.delete(SLOTS[n].streamId);
     SLOTS[n] = null;
     activeSlots.delete(n);
+    delete bandwidthStats[n];
   }
 }
 
@@ -275,8 +349,28 @@ function clearById(id) {
   deviceIndex.delete(id);
   SLOTS[n] = null;
   activeSlots.delete(n);
+  delete bandwidthStats[n];
   return true;
 }
+
+// Update bandwidth stats (called periodically)
+function updateBandwidthStats() {
+  const currentTime = now();
+  for (const slotNum of activeSlots) {
+    const slot = SLOTS[slotNum];
+    const stats = bandwidthStats[slotNum];
+    if (slot && stats) {
+      const elapsedSeconds = (currentTime - stats.lastUpdate) / 1000;
+      // Estimate: bitrate (kbps) * elapsed seconds / 8 = KB
+      const estimatedKB = (SETTINGS.bitrate * elapsedSeconds) / 8;
+      stats.bytesTransferred += estimatedKB * 1024; // Convert to bytes
+      stats.lastUpdate = currentTime;
+    }
+  }
+}
+
+// Update bandwidth every 10 seconds
+setInterval(updateBandwidthStats, 10000);
 
 // Root route - redirect to control page
 app.get("/", (req, res) => {
@@ -483,30 +577,59 @@ app.post("/api/config", requireAuth, async (r, s) => {
     s.json({ok: false, error: "maxSlots must be an integer between 1 and 50"});
   }
 });
-app.post("/api/claim",(r,s)=>{
-  const {streamId,label}=r.body||{};
-  if(!streamId)return s.json({ok:false});
-  const n=claim(streamId,label);
-  if(!n)return s.json({ok:false,error:"full"});
-  logActivity('join', `Camera joined slot ${n}`, n);
-  io.emit("state",{slots:SLOTS});
-  s.json({ok:true,slot:n});
-});
-app.post("/api/heartbeat",(r,s)=>{
-  const id=(r.body?.streamId||"").replace(/[^a-zA-Z0-9]/g,"");
-  const n=deviceIndex.get(id);
-  if(n&&SLOTS[n]){SLOTS[n].last=now();io.emit("state",{slots:SLOTS});}
-  s.json({ok:true});
-});
-app.post("/api/leave",(r,s)=>{
-  const id=(r.body?.streamId||"").replace(/[^a-zA-Z0-9]/g,"");
-  const n=deviceIndex.get(id);
-  const c=clearById(id);
-  if(c){
-    logActivity('leave', `Camera left slot ${n}`, n);
-    io.emit("state",{slots:SLOTS});
+// Public APIs with rate limiting
+app.post("/api/claim", (r, s) => {
+  const ip = r.ip || r.connection.remoteAddress;
+
+  // Rate limit: max 10 claims per minute per IP
+  if (!checkRateLimit(ip, 'claim', 10, 60000)) {
+    return s.status(429).json({ok: false, error: "Rate limit exceeded. Max 10 claims per minute."});
   }
-  s.json({ok:!!c});
+
+  const {streamId, label} = r.body || {};
+  if (!streamId) return s.json({ok: false});
+
+  const n = claim(streamId, label);
+  if (!n) return s.json({ok: false, error: "full"});
+
+  logActivity('join', `Camera joined slot ${n}`, n);
+  io.emit("state", {slots: SLOTS});
+  s.json({ok: true, slot: n});
+});
+
+app.post("/api/heartbeat", (r, s) => {
+  const ip = r.ip || r.connection.remoteAddress;
+
+  // Rate limit: max 30 heartbeats per minute per IP
+  if (!checkRateLimit(ip, 'heartbeat', 30, 60000)) {
+    return s.status(429).json({ok: false, error: "Rate limit exceeded"});
+  }
+
+  const id = (r.body?.streamId || "").replace(/[^a-zA-Z0-9]/g, "");
+  const n = deviceIndex.get(id);
+  if (n && SLOTS[n]) {
+    SLOTS[n].last = now();
+    io.emit("state", {slots: SLOTS});
+  }
+  s.json({ok: true});
+});
+
+app.post("/api/leave", (r, s) => {
+  const ip = r.ip || r.connection.remoteAddress;
+
+  // Rate limit: max 10 leaves per minute per IP
+  if (!checkRateLimit(ip, 'leave', 10, 60000)) {
+    return s.status(429).json({ok: false, error: "Rate limit exceeded"});
+  }
+
+  const id = (r.body?.streamId || "").replace(/[^a-zA-Z0-9]/g, "");
+  const n = deviceIndex.get(id);
+  const c = clearById(id);
+  if (c) {
+    logActivity('leave', `Camera left slot ${n}`, n);
+    io.emit("state", {slots: SLOTS});
+  }
+  s.json({ok: !!c});
 });
 app.post("/api/clear/:n",requireAuth,(r,s)=>{
   const n=+r.params.n;
@@ -517,7 +640,42 @@ app.post("/api/clear/:n",requireAuth,(r,s)=>{
   }
   s.json({ok:true});
 });
-app.get("/health",(r,s)=>s.json({ok:true,active:Object.values(SLOTS).filter(Boolean).length}));
+app.get("/health", (r, s) => {
+  const uptime = process.uptime();
+  const memUsage = process.memoryUsage();
+  s.json({
+    ok: true,
+    uptime: Math.floor(uptime),
+    active: activeSlots.size,
+    memory: {
+      heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024) + ' MB',
+      heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024) + ' MB'
+    },
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Bandwidth monitoring API
+app.get("/api/bandwidth", requireAuth, (r, s) => {
+  const stats = [];
+  for (const slotNum of activeSlots) {
+    const slot = SLOTS[slotNum];
+    const bw = bandwidthStats[slotNum];
+    if (slot && bw) {
+      const durationSeconds = (now() - bw.startTime) / 1000;
+      const megabytes = (bw.bytesTransferred / 1024 / 1024).toFixed(2);
+      stats.push({
+        slot: slotNum,
+        label: slot.label,
+        bytesTransferred: bw.bytesTransferred,
+        megabytes: parseFloat(megabytes),
+        durationSeconds: Math.floor(durationSeconds),
+        averageKbps: durationSeconds > 0 ? Math.round((bw.bytesTransferred * 8) / durationSeconds / 1000) : 0
+      });
+    }
+  }
+  s.json({stats});
+});
 
 // Settings API
 app.get("/api/settings",requireAuth,(r,s)=>{
@@ -1173,6 +1331,7 @@ function dashboardLayout(pageName,content){
   <a href="/network" class="nav-item ${pageName==='Network'?'active':''}">Network</a>
   <a href="/activity" class="nav-item ${pageName==='Activity'?'active':''}">Activity Log</a>
   <a href="/debug" class="nav-item ${pageName==='Debug'?'active':''}">Debug</a>
+  <a href="/terminal" class="nav-item ${pageName==='Terminal'?'active':''}">🖥️ Terminal</a>
   <a href="/guide" class="nav-item ${pageName==='Guide'?'active':''}">Guide</a>
   <a href="/settings" class="nav-item ${pageName==='Settings'?'active':''}">Settings</a>
   <div style="margin-top:auto;padding-top:20px;border-top:1px solid #2a2a3e">
@@ -1232,23 +1391,55 @@ app.get("/join",(req,res)=>{
 <script>
 function id(){let i=localStorage.getItem("sid");if(!i){i=Math.random().toString(36).slice(2,12);localStorage.setItem("sid",i);}return i;}
 const streamId=id();
+let vdoWindow=null;
+let currentSlot=localStorage.getItem("lastSlot");
+let reconnecting=false;
+
 async function post(u,b){return fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)});}
+
+// Auto-reconnection: Check if VDO window is still open
+setInterval(()=>{
+  if(vdoWindow && vdoWindow.closed && currentSlot && !reconnecting){
+    console.log("VDO window closed, attempting auto-reconnect...");
+    reconnecting=true;
+    setTimeout(()=>{
+      document.getElementById("msg").innerHTML='<div class="status">⚠️ Connection lost. Click Join to reconnect...</div>';
+      reconnecting=false;
+    },2000);
+  }
+},3000);
+
 setInterval(()=>post("/api/heartbeat",{streamId},true),2000);
 window.addEventListener("pagehide",()=>post("/api/leave",{streamId},true));
+
 document.getElementById("go").onclick=async()=>{
   console.log("Join button clicked, stream ID:",streamId);
   const w=window.open("about:blank","_blank");
   const r=await post("/api/claim",{streamId});
   const j=await r.json();
   console.log("Claim response:",j);
-  if(!j.ok){w.close();return alert("All slots full");}
+  if(!j.ok){
+    w.close();
+    if(j.error==="Rate limit exceeded. Max 10 claims per minute."){
+      return alert("Rate limit exceeded. Please wait a moment and try again.");
+    }
+    return alert("All slots full");
+  }
   const n=j.slot;
+  currentSlot=n;
+  localStorage.setItem("lastSlot",n);
   const vdoUrl="${VDO}/?push="+encodeURIComponent(streamId)
              +"&label=cam"+n+"&bitrate=${SETTINGS.bitrate}&codec=h264&autostart&webcam&muted&relay";
   console.log("Opening VDO.Ninja pusher:",vdoUrl);
   w.location=vdoUrl;
-  document.getElementById("msg").innerHTML='<div class="status">✅ Connected as Camera '+n+'</div><br>Keep this page open during the show';
+  vdoWindow=w;
+  document.getElementById("msg").innerHTML='<div class="status">✅ Connected as Camera '+n+'</div><br>Keep this page open. If disconnected, click Join again to reconnect automatically.';
 };
+
+// Show previous slot on page load
+if(currentSlot){
+  document.getElementById("msg").innerHTML='<div class="status">Last connected as Camera '+currentSlot+'</div><br>Click Join to reconnect';
+}
 </script></body></html>`);
 });
 
@@ -2364,6 +2555,78 @@ app.get("/activity",requireAuth,async(req,res)=>{
   res.send(dashboardLayout('Activity',content));
 });
 
+// Web Terminal page
+app.get("/terminal", requireAuth, async (req, res) => {
+  const content = `
+    <div class="header">
+      <div class="header-title">
+        <h1>🖥️ Web Terminal</h1>
+        <p class="subtitle">Secure SSH access to your Raspberry Pi</p>
+      </div>
+    </div>
+    <div class="card" style="padding:0;background:#000">
+      <div id="terminal" style="padding:10px;height:600px"></div>
+    </div>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+      const term = new Terminal({
+        cursorBlink: true,
+        fontSize: 14,
+        fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+        theme: {
+          background: '#000000',
+          foreground: '#00ff00',
+          cursor: '#00ff00',
+          selection: '#333333'
+        }
+      });
+      const fitAddon = new FitAddon.FitAddon();
+      term.loadAddon(fitAddon);
+      term.open(document.getElementById('terminal'));
+      fitAddon.fit();
+
+      const socket = io();
+
+      // Handle terminal output from server
+      socket.on('terminal-output', (data) => {
+        term.write(data);
+      });
+
+      // Send user input to server
+      term.onData((data) => {
+        socket.emit('terminal-input', data);
+      });
+
+      // Initial connection
+      socket.on('connect', () => {
+        socket.emit('terminal-start');
+        term.writeln('\\x1b[1;32m✓ Connected to Pi terminal\\x1b[0m');
+        term.writeln('\\x1b[1;33m⚠ Warning: Commands run with bridge user permissions\\x1b[0m');
+        term.writeln('');
+      });
+
+      socket.on('disconnect', () => {
+        term.writeln('\\r\\n\\x1b[1;31m✗ Disconnected from server\\x1b[0m');
+      });
+
+      // Handle window resize
+      window.addEventListener('resize', () => {
+        fitAddon.fit();
+        socket.emit('terminal-resize', { cols: term.cols, rows: term.rows });
+      });
+
+      // Send initial size
+      setTimeout(() => {
+        socket.emit('terminal-resize', { cols: term.cols, rows: term.rows });
+      }, 100);
+    </script>
+  `;
+  res.send(dashboardLayout('Terminal', content));
+});
+
 // Camera Control page
 app.get("/camera-control",requireAuth,async(req,res)=>{
   const content=`
@@ -2911,6 +3174,76 @@ app.get("/camera-control",requireAuth,async(req,res)=>{
     </script>
   `;
   res.send(dashboardLayout('OBS CAM Control',content));
+});
+
+// Socket.IO - Web Terminal handlers
+const {spawn} = require('child_process');
+const terminalSessions = new Map(); // socket.id -> shell process
+
+io.on('connection', (socket) => {
+  console.log(`Socket connected: ${socket.id}`);
+
+  socket.on('terminal-start', () => {
+    // Only allow authenticated users
+    const session = socket.request.session;
+    if (!session || !session.authenticated) {
+      socket.emit('terminal-output', '\r\n\x1b[1;31mError: Not authenticated\x1b[0m\r\n');
+      socket.disconnect();
+      return;
+    }
+
+    // Spawn a shell process
+    const shell = spawn('/bin/bash', ['-i'], {
+      env: process.env,
+      cwd: process.env.HOME || '/home/pi'
+    });
+
+    terminalSessions.set(socket.id, shell);
+
+    // Send shell output to client
+    shell.stdout.on('data', (data) => {
+      socket.emit('terminal-output', data.toString());
+    });
+
+    shell.stderr.on('data', (data) => {
+      socket.emit('terminal-output', data.toString());
+    });
+
+    shell.on('exit', (code) => {
+      socket.emit('terminal-output', `\r\n\x1b[1;33mShell exited with code ${code}\x1b[0m\r\n`);
+      terminalSessions.delete(socket.id);
+    });
+
+    console.log(`Terminal session started for ${session.username}`);
+    logActivity('system', `Terminal session started by ${session.username}`);
+  });
+
+  socket.on('terminal-input', (data) => {
+    const shell = terminalSessions.get(socket.id);
+    if (shell && shell.stdin.writable) {
+      shell.stdin.write(data);
+    }
+  });
+
+  socket.on('terminal-resize', (size) => {
+    const shell = terminalSessions.get(socket.id);
+    if (shell && shell.resize) {
+      try {
+        shell.resize(size.cols, size.rows);
+      } catch (e) {
+        // Resize not supported in simple spawn
+      }
+    }
+  });
+
+  socket.on('disconnect', () => {
+    const shell = terminalSessions.get(socket.id);
+    if (shell) {
+      shell.kill();
+      terminalSessions.delete(socket.id);
+      console.log(`Terminal session ended: ${socket.id}`);
+    }
+  });
 });
 
 // Optimized slot cleanup - only checks active slots
