@@ -1,5 +1,5 @@
 /****************************************************************
- * Merimac VDO.Ninja Bridge — Fixed Browser Autoplay (Nov 2025)
+ * Merimac VDO.Ninja Bridge — Enhanced Security & Performance
  ****************************************************************/
 const express = require("express");
 const http = require("http");
@@ -7,16 +7,34 @@ const { Server } = require("socket.io");
 const QRCode = require("qrcode");
 const session = require("express-session");
 const fs = require("fs");
+const fsPromises = require("fs").promises;
 const path = require("path");
 const WebSocket = require("ws");
+const crypto = require("crypto");
+const {exec} = require("child_process");
+const util = require("util");
+const execAsync = util.promisify(exec);
+const net = require("net");
+const os = require("os");
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
 
-const PORT = 8080;
-const PUBLIC_HOST = "https://bridge.merimac.ca";
-const VDO = "https://vdo.ninja";
+// Trust proxy for Cloudflare
+app.set('trust proxy', true);
+
+const PUBLIC_HOST = process.env.PUBLIC_HOST || "https://bridge.merimac.ca";
+
+// Configure Socket.IO with proper CORS
+const io = new Server(server, {
+  cors: {
+    origin: PUBLIC_HOST,
+    credentials: true
+  }
+});
+
+const PORT = process.env.PORT || 8080;
+const VDO = process.env.VDO_NINJA || "https://vdo.ninja";
 const ROOM = "MERIMAC";
 
 const INACTIVITY_MS = 8_000;  // Clear inactive slots after 8 seconds
@@ -26,6 +44,22 @@ const GRACE_MS = 5_000;        // 5 second grace period on initial connection
 const SETTINGS_FILE = path.join(__dirname, 'bridge-settings.json');
 const ACTIVITY_LOG_FILE = path.join(__dirname, 'activity-log.json');
 const CAMERAS_FILE = path.join(__dirname, 'camera-control.json');
+const SESSION_SECRET_FILE = path.join(__dirname, '.session-secret');
+
+// Generate or load session secret
+let SESSION_SECRET;
+try {
+  if (fs.existsSync(SESSION_SECRET_FILE)) {
+    SESSION_SECRET = fs.readFileSync(SESSION_SECRET_FILE, 'utf8');
+  } else {
+    SESSION_SECRET = crypto.randomBytes(64).toString('hex');
+    fs.writeFileSync(SESSION_SECRET_FILE, SESSION_SECRET);
+    console.log('Generated new session secret');
+  }
+} catch (e) {
+  console.error('Error with session secret:', e.message);
+  SESSION_SECRET = crypto.randomBytes(64).toString('hex');
+}
 
 // Default settings
 let SETTINGS = {
@@ -39,6 +73,7 @@ let SETTINGS = {
 
 // Activity log (in-memory with file backup)
 let ACTIVITY_LOG = [];
+let activityLogSaveTimeout = null;
 
 // Camera control storage
 let CAMERAS = []; // Array of {id, name, ip, connected, lastSeen, settings}
@@ -46,6 +81,9 @@ const cameraConnections = new Map(); // ip -> WebSocket connection
 
 // Login attempt tracking for rate limiting
 const loginAttempts = new Map(); // IP -> {count, lastAttempt, lockedUntil}
+
+// Track active slots for efficient cleanup
+const activeSlots = new Set();
 
 // Load settings from file
 function loadSettings() {
@@ -61,10 +99,10 @@ function loadSettings() {
   }
 }
 
-// Save settings to file
-function saveSettings() {
+// Save settings to file (async)
+async function saveSettings() {
   try {
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(SETTINGS, null, 2));
+    await fsPromises.writeFile(SETTINGS_FILE, JSON.stringify(SETTINGS, null, 2));
     console.log('Settings saved to file');
   } catch (e) {
     console.error('Error saving settings:', e.message);
@@ -88,13 +126,22 @@ function loadActivityLog() {
   }
 }
 
-// Save activity log
-function saveActivityLog() {
+// Save activity log (async with debouncing)
+async function saveActivityLog() {
   try {
-    fs.writeFileSync(ACTIVITY_LOG_FILE, JSON.stringify(ACTIVITY_LOG, null, 2));
+    await fsPromises.writeFile(ACTIVITY_LOG_FILE, JSON.stringify(ACTIVITY_LOG, null, 2));
   } catch (e) {
     console.error('Error saving activity log:', e.message);
   }
+}
+
+function debouncedSaveActivityLog() {
+  if (activityLogSaveTimeout) {
+    clearTimeout(activityLogSaveTimeout);
+  }
+  activityLogSaveTimeout = setTimeout(() => {
+    saveActivityLog();
+  }, 5000); // Save after 5 seconds of no activity
 }
 
 // Add activity log entry
@@ -110,10 +157,8 @@ function logActivity(type, message, slotNumber = null) {
   if (ACTIVITY_LOG.length > 500) {
     ACTIVITY_LOG.shift();
   }
-  // Save periodically (every 10 entries)
-  if (ACTIVITY_LOG.length % 10 === 0) {
-    saveActivityLog();
-  }
+  // Debounced save (saves after 5 seconds of no new activity)
+  debouncedSaveActivityLog();
   // Emit to connected clients
   io.emit('activity', entry);
 }
@@ -131,10 +176,10 @@ function loadCameras() {
   }
 }
 
-// Save cameras to file
-function saveCameras() {
+// Save cameras to file (async)
+async function saveCameras() {
   try {
-    fs.writeFileSync(CAMERAS_FILE, JSON.stringify(CAMERAS, null, 2));
+    await fsPromises.writeFile(CAMERAS_FILE, JSON.stringify(CAMERAS, null, 2));
     console.log('Cameras saved to file');
   } catch (e) {
     console.error('Error saving cameras:', e.message);
@@ -149,14 +194,16 @@ loadCameras();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Session middleware
+// Session middleware with secure secret
 app.use(session({
-  secret: 'merimac-bridge-secret-key-change-in-production',
+  secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
   cookie: {
     secure: false, // Set to true if using HTTPS directly (Cloudflare tunnel handles this)
-    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    httpOnly: true,
+    sameSite: 'lax'
   }
 }));
 
@@ -174,17 +221,62 @@ function requireAuth(req, res, next) {
   res.redirect('/login');
 }
 
-function now(){return Date.now();}
-function firstFree(){for(let i=1;i<=MAX_SLOTS;i++) if(!SLOTS[i]) return i; return null;}
-function claim(streamId,label){
-  const id=String(streamId).replace(/[^a-zA-Z0-9]/g,"");
-  if(deviceIndex.has(id)){const n=deviceIndex.get(id);SLOTS[n].last=now();return n;}
-  const n=firstFree(); if(!n)return null;
-  SLOTS[n]={streamId:id,label:label||"cam",since:now(),last:now(),grace:now()+GRACE_MS};
-  deviceIndex.set(id,n); return n;
+// Helper functions
+function now() {
+  return Date.now();
 }
-function clearSlot(n){if(SLOTS[n]){deviceIndex.delete(SLOTS[n].streamId);SLOTS[n]=null;}}
-function clearById(id){const n=deviceIndex.get(id);if(!n)return;deviceIndex.delete(id);SLOTS[n]=null;return true;}
+
+function firstFree() {
+  for (let i = 1; i <= MAX_SLOTS; i++) {
+    if (!SLOTS[i]) return i;
+  }
+  return null;
+}
+
+function claim(streamId, label) {
+  const id = String(streamId).replace(/[^a-zA-Z0-9]/g, "");
+  if (!id) return null;
+
+  // Update existing slot
+  if (deviceIndex.has(id)) {
+    const n = deviceIndex.get(id);
+    SLOTS[n].last = now();
+    return n;
+  }
+
+  // Find free slot
+  const n = firstFree();
+  if (!n) return null;
+
+  // Claim slot
+  SLOTS[n] = {
+    streamId: id,
+    label: (label || "cam").replace(/[<>]/g, ""), // Sanitize label
+    since: now(),
+    last: now(),
+    grace: now() + GRACE_MS
+  };
+  deviceIndex.set(id, n);
+  activeSlots.add(n);
+  return n;
+}
+
+function clearSlot(n) {
+  if (SLOTS[n]) {
+    deviceIndex.delete(SLOTS[n].streamId);
+    SLOTS[n] = null;
+    activeSlots.delete(n);
+  }
+}
+
+function clearById(id) {
+  const n = deviceIndex.get(id);
+  if (!n) return;
+  deviceIndex.delete(id);
+  SLOTS[n] = null;
+  activeSlots.delete(n);
+  return true;
+}
 
 // Root route - redirect to control page
 app.get("/", (req, res) => {
@@ -303,9 +395,17 @@ app.get("/logout", (req, res) => {
 // Forgot password page
 app.get("/forgot-password", (req, res) => {
   const error = req.query.error;
-  const success = req.query.success;
-  const username = req.query.u || '';
-  const password = req.query.p || '';
+  // Use session to store credentials temporarily (more secure than URL)
+  const username = req.session.resetUsername || '';
+  const password = req.session.resetPassword || '';
+  const success = username && password;
+
+  // Clear session data after displaying
+  if (success) {
+    delete req.session.resetUsername;
+    delete req.session.resetPassword;
+  }
+
   res.send(`<!doctype html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Reset Password - Merimac Bridge</title>
@@ -357,27 +457,30 @@ app.get("/forgot-password", (req, res) => {
 </body></html>`);
 });
 
-// Forgot password POST
+// Forgot password POST (secure - uses session instead of URL)
 app.post("/forgot-password", (req, res) => {
   const { pin } = req.body;
   if (pin === SETTINGS.resetPin) {
-    res.redirect('/forgot-password?success=1&u=' + encodeURIComponent(SETTINGS.username) + '&p=' + encodeURIComponent(SETTINGS.password));
+    // Store in session temporarily instead of URL
+    req.session.resetUsername = SETTINGS.username;
+    req.session.resetPassword = SETTINGS.password;
+    res.redirect('/forgot-password');
   } else {
     res.redirect('/forgot-password?error=1');
   }
 });
 
 app.get("/api/state",(r,s)=>s.json({slots:SLOTS,maxSlots:MAX_SLOTS}));
-app.post("/api/config",requireAuth,(r,s)=>{
-  const {maxSlots}=r.body||{};
-  if(maxSlots&&maxSlots>=1&&maxSlots<=50){
-    MAX_SLOTS=maxSlots;
-    SETTINGS.maxSlots=maxSlots;
-    saveSettings();
+app.post("/api/config", requireAuth, async (r, s) => {
+  const {maxSlots} = r.body || {};
+  if (maxSlots && Number.isInteger(maxSlots) && maxSlots >= 1 && maxSlots <= 50) {
+    MAX_SLOTS = maxSlots;
+    SETTINGS.maxSlots = maxSlots;
+    await saveSettings();
     logActivity('system', `Max slots changed to ${maxSlots}`);
-    s.json({ok:true,maxSlots:MAX_SLOTS});
-  }else{
-    s.json({ok:false,error:"maxSlots must be between 1 and 50"});
+    s.json({ok: true, maxSlots: MAX_SLOTS});
+  } else {
+    s.json({ok: false, error: "maxSlots must be an integer between 1 and 50"});
   }
 });
 app.post("/api/claim",(r,s)=>{
@@ -424,37 +527,57 @@ app.get("/api/settings",requireAuth,(r,s)=>{
   });
 });
 
-app.post("/api/settings",requireAuth,(r,s)=>{
-  const {bitrate, networkRefreshInterval, username, password, resetPin}=r.body||{};
+app.post("/api/settings", requireAuth, async (r, s) => {
+  const {bitrate, networkRefreshInterval, username, password, resetPin} = r.body || {};
 
-  // Update bitrate
-  if(bitrate && bitrate >= 500 && bitrate <= 10000){
-    SETTINGS.bitrate = bitrate;
+  // Update bitrate with proper validation
+  if (bitrate !== undefined) {
+    if (Number.isInteger(bitrate) && bitrate >= 500 && bitrate <= 10000) {
+      SETTINGS.bitrate = bitrate;
+    } else {
+      return s.json({ok: false, error: "Bitrate must be an integer between 500 and 10000"});
+    }
   }
 
   // Update network refresh interval
-  if(networkRefreshInterval && networkRefreshInterval >= 1 && networkRefreshInterval <= 60){
-    SETTINGS.networkRefreshInterval = networkRefreshInterval;
+  if (networkRefreshInterval !== undefined) {
+    if (Number.isInteger(networkRefreshInterval) && networkRefreshInterval >= 1 && networkRefreshInterval <= 60) {
+      SETTINGS.networkRefreshInterval = networkRefreshInterval;
+    } else {
+      return s.json({ok: false, error: "Network refresh interval must be an integer between 1 and 60"});
+    }
   }
 
-  // Update credentials
-  if(username && username.length >= 3){
-    SETTINGS.username = username;
-    logActivity('system', `Username changed to ${username}`);
+  // Update credentials with validation
+  if (username !== undefined) {
+    if (typeof username === 'string' && username.length >= 3 && username.length <= 50 && /^[a-zA-Z0-9_-]+$/.test(username)) {
+      SETTINGS.username = username;
+      logActivity('system', `Username changed to ${username}`);
+    } else {
+      return s.json({ok: false, error: "Username must be 3-50 alphanumeric characters"});
+    }
   }
 
-  if(password && password.length >= 6){
-    SETTINGS.password = password;
-    logActivity('system', 'Password changed');
+  if (password !== undefined) {
+    if (typeof password === 'string' && password.length >= 6 && password.length <= 100) {
+      SETTINGS.password = password;
+      logActivity('system', 'Password changed');
+    } else {
+      return s.json({ok: false, error: "Password must be 6-100 characters"});
+    }
   }
 
-  if(resetPin && /^\d{6}$/.test(resetPin)){
-    SETTINGS.resetPin = resetPin;
-    logActivity('system', 'Reset PIN changed');
+  if (resetPin !== undefined) {
+    if (/^\d{6}$/.test(resetPin)) {
+      SETTINGS.resetPin = resetPin;
+      logActivity('system', 'Reset PIN changed');
+    } else {
+      return s.json({ok: false, error: "Reset PIN must be exactly 6 digits"});
+    }
   }
 
-  saveSettings();
-  s.json({ok:true, settings: {bitrate: SETTINGS.bitrate, networkRefreshInterval: SETTINGS.networkRefreshInterval}});
+  await saveSettings();
+  s.json({ok: true, settings: {bitrate: SETTINGS.bitrate, networkRefreshInterval: SETTINGS.networkRefreshInterval}});
 });
 
 // Clear all slots API
@@ -472,9 +595,10 @@ app.post("/api/clear-all",requireAuth,(r,s)=>{
 });
 
 // Activity log API
-app.get("/api/activity",requireAuth,(r,s)=>{
-  const limit = parseInt(r.query.limit) || 100;
-  const logs = ACTIVITY_LOG.slice(-limit).reverse();
+app.get("/api/activity", requireAuth, (r, s) => {
+  const limit = parseInt(r.query.limit, 10) || 100;
+  const safeLimit = Math.min(Math.max(limit, 1), 500); // Clamp between 1 and 500
+  const logs = ACTIVITY_LOG.slice(-safeLimit).reverse();
   s.json({logs});
 });
 
@@ -483,19 +607,14 @@ app.get("/api/cameras",requireAuth,(r,s)=>{
   s.json({cameras: CAMERAS});
 });
 
-app.post("/api/cameras/scan",requireAuth,async(r,s)=>{
-  const {exec}=require("child_process");
-  const util=require("util");
-  const execAsync=util.promisify(exec);
-  const net=require("net");
-
-  try{
-    const foundCameras=[];
-    const {customSubnet}=r.body||{};
+app.post("/api/cameras/scan", requireAuth, async (r, s) => {
+  // Modules already required at top of file
+  try {
+    const foundCameras = [];
+    const {customSubnet} = r.body || {};
 
     // Get all network interfaces
-    const os=require("os");
-    const interfaces=os.networkInterfaces();
+    const interfaces = os.networkInterfaces();
     const subnets=new Set();
     const localIPs=new Set();
 
@@ -2794,13 +2913,88 @@ app.get("/camera-control",requireAuth,async(req,res)=>{
   res.send(dashboardLayout('OBS CAM Control',content));
 });
 
-setInterval(()=>{
-  const t=now();let ch=false;
-  for(let i=1;i<=50;i++){
-    const s=SLOTS[i];if(!s)continue;
-    if(t-s.last>INACTIVITY_MS && t>s.grace){deviceIndex.delete(s.streamId);SLOTS[i]=null;ch=true;}
-  }
-  if(ch)io.emit("state",{slots:SLOTS});
-},3000);
+// Optimized slot cleanup - only checks active slots
+const cleanupInterval = setInterval(() => {
+  const t = now();
+  let changed = false;
 
-server.listen(PORT,()=>console.log("Bridge listening :"+PORT));
+  // Only iterate through active slots instead of all 50
+  for (const slotNum of activeSlots) {
+    const s = SLOTS[slotNum];
+    if (!s) {
+      activeSlots.delete(slotNum);
+      continue;
+    }
+
+    if (t - s.last > INACTIVITY_MS && t > s.grace) {
+      deviceIndex.delete(s.streamId);
+      SLOTS[slotNum] = null;
+      activeSlots.delete(slotNum);
+      changed = true;
+      logActivity('leave', `Camera slot ${slotNum} timed out`, slotNum);
+    }
+  }
+
+  if (changed) {
+    io.emit("state", {slots: SLOTS});
+  }
+}, 3000);
+
+// Graceful shutdown
+async function gracefulShutdown(signal) {
+  console.log(`\n${signal} received. Starting graceful shutdown...`);
+
+  // Stop accepting new connections
+  clearInterval(cleanupInterval);
+
+  // Save all data
+  console.log('Saving activity log...');
+  await saveActivityLog();
+
+  console.log('Saving cameras...');
+  await saveCameras();
+
+  console.log('Saving settings...');
+  await saveSettings();
+
+  // Close server
+  server.close(() => {
+    console.log('Server closed. Exiting.');
+    process.exit(0);
+  });
+
+  // Force exit after 10 seconds
+  setTimeout(() => {
+    console.error('Forced shutdown after timeout');
+    process.exit(1);
+  }, 10000);
+}
+
+// Handle shutdown signals
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Handle uncaught errors
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err);
+  gracefulShutdown('uncaughtException');
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled rejection at:', promise, 'reason:', reason);
+});
+
+// Start server with error handling
+server.listen(PORT, () => {
+  console.log(`✓ Bridge listening on port ${PORT}`);
+  console.log(`✓ Public host: ${PUBLIC_HOST}`);
+  console.log(`✓ Active slots tracking: enabled`);
+  console.log(`✓ Graceful shutdown: enabled`);
+}).on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`✗ Port ${PORT} is already in use`);
+  } else {
+    console.error('✗ Server error:', err);
+  }
+  process.exit(1);
+});
