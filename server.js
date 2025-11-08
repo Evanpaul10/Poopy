@@ -598,13 +598,8 @@ app.post("/api/claim", (r, s) => {
 });
 
 app.post("/api/heartbeat", (r, s) => {
-  const ip = r.ip || r.connection.remoteAddress;
-
-  // Rate limit: max 30 heartbeats per minute per IP
-  if (!checkRateLimit(ip, 'heartbeat', 30, 60000)) {
-    return s.status(429).json({ok: false, error: "Rate limit exceeded"});
-  }
-
+  // No rate limiting on heartbeat - it's already protected by streamId validation
+  // and limited by the number of available slots
   const id = (r.body?.streamId || "").replace(/[^a-zA-Z0-9]/g, "");
   const n = deviceIndex.get(id);
   if (n && SLOTS[n]) {
@@ -1389,27 +1384,14 @@ app.get("/join",(req,res)=>{
   <p id="msg">Tap the button above to get started</p>
 </div>
 <script>
+// Generate a unique stream ID for this device
 function id(){let i=localStorage.getItem("sid");if(!i){i=Math.random().toString(36).slice(2,12);localStorage.setItem("sid",i);}return i;}
 const streamId=id();
-let vdoWindow=null;
-let currentSlot=localStorage.getItem("lastSlot");
-let reconnecting=false;
+let heartbeatInterval=null;
 
 async function post(u,b){return fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)});}
 
-// Auto-reconnection: Check if VDO window is still open
-setInterval(()=>{
-  if(vdoWindow && vdoWindow.closed && currentSlot && !reconnecting){
-    console.log("VDO window closed, attempting auto-reconnect...");
-    reconnecting=true;
-    setTimeout(()=>{
-      document.getElementById("msg").innerHTML='<div class="status">⚠️ Connection lost. Click Join to reconnect...</div>';
-      reconnecting=false;
-    },2000);
-  }
-},3000);
-
-setInterval(()=>post("/api/heartbeat",{streamId},true),2000);
+// Clean up on page close
 window.addEventListener("pagehide",()=>post("/api/leave",{streamId},true));
 
 document.getElementById("go").onclick=async()=>{
@@ -1426,20 +1408,17 @@ document.getElementById("go").onclick=async()=>{
     return alert("All slots full");
   }
   const n=j.slot;
-  currentSlot=n;
-  localStorage.setItem("lastSlot",n);
   const vdoUrl="${VDO}/?push="+encodeURIComponent(streamId)
              +"&label=cam"+n+"&bitrate=${SETTINGS.bitrate}&codec=h264&autostart&webcam&muted&relay";
   console.log("Opening VDO.Ninja pusher:",vdoUrl);
   w.location=vdoUrl;
-  vdoWindow=w;
-  document.getElementById("msg").innerHTML='<div class="status">✅ Connected as Camera '+n+'</div><br>Keep this page open. If disconnected, click Join again to reconnect automatically.';
-};
 
-// Show previous slot on page load
-if(currentSlot){
-  document.getElementById("msg").innerHTML='<div class="status">Last connected as Camera '+currentSlot+'</div><br>Click Join to reconnect';
-}
+  // Start sending heartbeats only after successfully claiming a slot
+  if(heartbeatInterval)clearInterval(heartbeatInterval);
+  heartbeatInterval=setInterval(()=>post("/api/heartbeat",{streamId},true),2000);
+
+  document.getElementById("msg").innerHTML='<div class="status">✅ Connected as Camera '+n+'</div><br>Keep this page open while streaming.';
+};
 </script></body></html>`);
 });
 
