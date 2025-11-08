@@ -1117,12 +1117,17 @@ async function post(u,b){return fetch(u,{method:"POST",headers:{"Content-Type":"
 setInterval(()=>post("/api/heartbeat",{streamId},true),2000);
 window.addEventListener("pagehide",()=>post("/api/leave",{streamId},true));
 document.getElementById("go").onclick=async()=>{
+  console.log("Join button clicked, stream ID:",streamId);
   const w=window.open("about:blank","_blank");
   const r=await post("/api/claim",{streamId});
-  const j=await r.json(); if(!j.ok){w.close();return alert("All slots full");}
+  const j=await r.json();
+  console.log("Claim response:",j);
+  if(!j.ok){w.close();return alert("All slots full");}
   const n=j.slot;
-  w.location="${VDO}/?push="+encodeURIComponent(streamId)
-             +"&label=cam"+n+"&bitrate=${SETTINGS.bitrate}&codec=h264&autostart&webcam&muted";
+  const vdoUrl="${VDO}/?push="+encodeURIComponent(streamId)
+             +"&label=cam"+n+"&bitrate=${SETTINGS.bitrate}&codec=h264&autostart&webcam&muted&novideo=0&noaudio=0";
+  console.log("Opening VDO.Ninja pusher:",vdoUrl);
+  w.location=vdoUrl;
   document.getElementById("msg").innerHTML='<div class="status">✅ Connected as Camera '+n+'</div><br>Keep this page open during the show';
 };
 </script></body></html>`);
@@ -1153,13 +1158,20 @@ function render(id){
   if(!id){wrap.innerHTML='<div class="waiting">Waiting for camera ${n}…</div>';return;}
 
   let url="${VDO}/?view="+encodeURIComponent(id)
-          +"&cleanoutput=1&stats=0&scene&autostart=1&coverview";
+          +"&cleanoutput=1&stats=0&scene&autostart=1&coverview&novideo=0&noaudio=0";
   if(!isOBS())url+="&muted=1";
+
+  console.log("Loading VDO.Ninja viewer for stream:",id);
+  console.log("URL:",url);
 
   const f=document.createElement("iframe");
   f.allow="autoplay; camera; microphone; fullscreen; display-capture; encrypted-media; picture-in-picture";
   f.setAttribute("allowfullscreen","");
   f.src=url;
+
+  // Debug iframe load
+  f.onload=()=>console.log("VDO.Ninja iframe loaded");
+  f.onerror=(e)=>console.error("VDO.Ninja iframe error:",e);
 
   wrap.appendChild(f);
 
@@ -1168,14 +1180,21 @@ function render(id){
     needsClick=true;
     const ov=document.createElement("div");
     ov.id="overlay";
-    ov.innerHTML='<div>▶ Click to Play Video</div>';
+    ov.innerHTML='<div>▶ Click to Play Video<br><small style="font-size:14px;opacity:0.7;margin-top:10px;display:block">Camera slot ${n} is active</small></div>';
     ov.onclick=()=>{
-      ov.remove();
-      needsClick=false;
-      // Reload iframe to trigger autoplay after user interaction
-      f.src=f.src;
+      console.log("User clicked to start video");
+      ov.innerHTML='<div>Loading video stream...</div>';
+      setTimeout(()=>{
+        ov.remove();
+        needsClick=false;
+        // Reload iframe to trigger autoplay after user interaction
+        f.src=f.src;
+        console.log("Reloading iframe with autoplay");
+      },300);
     };
     wrap.appendChild(ov);
+  }else{
+    console.log("OBS detected, skipping click-to-play overlay");
   }
 }
 async function poll(){
