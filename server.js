@@ -1049,9 +1049,8 @@ function dashboardLayout(pageName,content){
 </head><body>
 <div class="sidebar">
   <div class="sidebar-title">Merimac Bridge</div>
-  <a href="/control" class="nav-item ${pageName==='Control'?'active':''}">Control</a>
-  <a href="/group" class="nav-item ${pageName==='Group Feed'?'active':''}" target="_blank">Group Feed</a>
-  <a href="/camera-control" class="nav-item ${pageName==='Camera Control'?'active':''}">Camera Control</a>
+  <a href="/control" class="nav-item ${pageName==='Audience Cam Control'?'active':''}">Audience Cam Control</a>
+  <a href="/camera-control" class="nav-item ${pageName==='OBS CAM Control'?'active':''}">OBS CAM Control</a>
   <a href="/network" class="nav-item ${pageName==='Network'?'active':''}">Network</a>
   <a href="/activity" class="nav-item ${pageName==='Activity'?'active':''}">Activity Log</a>
   <a href="/debug" class="nav-item ${pageName==='Debug'?'active':''}">Debug</a>
@@ -1289,7 +1288,7 @@ html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:syste
 </style>
 </head><body>
 <div id="toolbar">
-  <button onclick="copyCleanLink()">📋 Copy Clean Link</button>
+  <button onclick="copyCleanLink()">📋 Copy OBS Link</button>
 </div>
 <div id="grid"></div>
 <div id="no-cameras" style="display:none">
@@ -1403,10 +1402,10 @@ function render(){
 function copyCleanLink(){
   const cleanUrl=window.location.origin+"/group-clean";
   navigator.clipboard.writeText(cleanUrl).then(()=>{
-    showToast("Clean link copied to clipboard!");
+    showToast("OBS link copied to clipboard!");
   }).catch(err=>{
     console.error("Failed to copy:",err);
-    showToast("Failed to copy link");
+    showToast("Failed to copy OBS link");
   });
 }
 
@@ -1584,7 +1583,7 @@ app.get("/control",requireAuth,async(req,res)=>{
     <td>${status}</td>
     <td class="stream-id">${id}</td>
     <td class="duration">${duration}</td>
-    <td><a href="/slot/${i}" target="_blank" class="btn-link">View</a> <button onclick="copySlotUrl('${slotUrl}')" class="btn-copy">Copy Link</button></td>
+    <td><a href="/slot/${i}" target="_blank" class="btn-link">View</a> <button onclick="copySlotUrl('${slotUrl}')" class="btn-copy">Copy OBS Link</button></td>
     <td><button onclick="clearSlot(${i})" class="btn-clear" ${!s?'disabled':''}>Clear</button></td></tr>`);
   }
   const rowsHtml=rows.join("");
@@ -1732,7 +1731,7 @@ app.get("/control",requireAuth,async(req,res)=>{
           <td>\${status}</td>
           <td class="stream-id">\${id}</td>
           <td class="duration">\${duration}</td>
-          <td><a href="/slot/\${i}" target="_blank" class="btn-link">View</a> <button onclick="copySlotUrl('\${slotUrl}')" class="btn-copy">Copy Link</button></td>
+          <td><a href="/slot/\${i}" target="_blank" class="btn-link">View</a> <button onclick="copySlotUrl('\${slotUrl}')" class="btn-copy">Copy OBS Link</button></td>
           <td><button onclick="clearSlot(\${i})" class="btn-clear" \${disabled}>Clear</button></td></tr>\`;
         }
         document.getElementById('t').innerHTML=h;
@@ -1786,7 +1785,7 @@ app.get("/control",requireAuth,async(req,res)=>{
     setInterval(refresh,2000);  // Also poll every 2 seconds as backup
     </script>
   `;
-  res.send(dashboardLayout('Control',content));
+  res.send(dashboardLayout('Audience Cam Control',content));
 });
 
 // Network page
@@ -2014,7 +2013,7 @@ app.get("/guide",requireAuth,async(req,res)=>{
         <ol>
           <li>In OBS, add a new <strong>Browser Source</strong></li>
           <li>Go to the Control page and find the slot you want to use</li>
-          <li>Click the <strong>"Copy Link"</strong> button next to the slot</li>
+          <li>Click the <strong>"Copy OBS Link"</strong> button next to the slot</li>
           <li>Paste the URL into the OBS Browser Source settings</li>
           <li>Set width to <code>1920</code> and height to <code>1080</code> (or your desired resolution)</li>
           <li>Click OK - the camera feed will appear automatically when someone connects to that slot!</li>
@@ -2792,7 +2791,7 @@ app.get("/camera-control",requireAuth,async(req,res)=>{
     loadCameras();
     </script>
   `;
-  res.send(dashboardLayout('Camera Control',content));
+  res.send(dashboardLayout('OBS CAM Control',content));
 });
 
 setInterval(()=>{
