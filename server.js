@@ -1313,10 +1313,13 @@ function render(){
   }
 
   console.log("Rendering group feed - slots changed");
+  console.log("activeSlots:", JSON.stringify(activeSlots));
   previousSlots=JSON.parse(JSON.stringify(activeSlots));
 
   // Get all active slots
-  const active=Object.entries(activeSlots).filter(([n,id])=>id).sort((a,b)=>+a[0]-(+b[0]));
+  const active=Object.entries(activeSlots).filter(([n,slot])=>slot).sort((a,b)=>+a[0]-(+b[0]));
+  console.log("Active slots after filter:", active.length);
+  console.log("Active slots data:", JSON.stringify(active));
 
   if(active.length===0){
     grid.style.display='none';
@@ -1337,6 +1340,7 @@ function render(){
   // Create iframe for each active slot
   active.forEach(([slotNum,slot])=>{
     const streamId=slot?.streamId;
+    console.log(\`Slot \${slotNum}: streamId=\${streamId}\`);
     const container=document.createElement("div");
     container.className="slot-container";
     container.dataset.slot=slotNum;
@@ -1354,6 +1358,7 @@ function render(){
     }else{
       let url=\`${VDO}/?view=\${encodeURIComponent(streamId)}&cleanoutput=1&stats=0&scene&autostart=1&coverview&relay\`;
       if(!isOBS())url+="&muted=1";
+      console.log(\`Creating iframe for slot \${slotNum} with URL: \${url}\`);
 
       const iframe=document.createElement("iframe");
       iframe.allow="autoplay; camera; microphone; fullscreen; display-capture; encrypted-media; picture-in-picture";
@@ -1390,7 +1395,9 @@ function render(){
 async function poll(){
   try{
     const j=await fetch("/api/state").then(r=>r.json());
+    console.log("Fetched state from API:", JSON.stringify(j));
     activeSlots=j.slots||{};
+    console.log("activeSlots set to:", JSON.stringify(activeSlots));
     render();
   }catch(e){console.error("Poll error:",e);}
 }
