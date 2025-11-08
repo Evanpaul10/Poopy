@@ -1296,11 +1296,26 @@ html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:syste
 const grid=document.getElementById("grid");
 const noCameras=document.getElementById("no-cameras");
 let activeSlots={};
+let previousSlots={};
 let needsClick=true;
 
 function isOBS(){return /OBS|obslocal|obsbrowser/i.test(navigator.userAgent);}
 
+function slotsChanged(){
+  const curr=Object.entries(activeSlots).filter(([n,id])=>id).map(([n,id])=>n+':'+id).sort().join(',');
+  const prev=Object.entries(previousSlots).filter(([n,id])=>id).map(([n,id])=>n+':'+id).sort().join(',');
+  return curr!==prev;
+}
+
 function render(){
+  // Only re-render if slots actually changed
+  if(!slotsChanged() && grid.children.length>0){
+    return;
+  }
+
+  console.log("Rendering group feed - slots changed");
+  previousSlots=JSON.parse(JSON.stringify(activeSlots));
+
   // Get all active slots
   const active=Object.entries(activeSlots).filter(([n,id])=>id).sort((a,b)=>+a[0]-(+b[0]));
 
