@@ -1050,6 +1050,7 @@ function dashboardLayout(pageName,content){
 <div class="sidebar">
   <div class="sidebar-title">Merimac Bridge</div>
   <a href="/control" class="nav-item ${pageName==='Control'?'active':''}">Control</a>
+  <a href="/group" class="nav-item ${pageName==='Group Feed'?'active':''}" target="_blank">Group Feed</a>
   <a href="/camera-control" class="nav-item ${pageName==='Camera Control'?'active':''}">Camera Control</a>
   <a href="/network" class="nav-item ${pageName==='Network'?'active':''}">Network</a>
   <a href="/activity" class="nav-item ${pageName==='Activity'?'active':''}">Activity Log</a>
@@ -1256,6 +1257,137 @@ poll();
 const io_=io();
 io_.on("state",poll);
 setInterval(poll,2000);  // Poll every 2 seconds for faster updates
+</script></body></html>`);
+});
+
+// Group feed - show all active cameras in auto-scaling grid
+app.get("/group",(req,res)=>{
+  res.send(`<!doctype html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Group Feed - All Cameras</title>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui}
+#grid{display:grid;gap:2px;width:100%;height:100%;padding:2px;box-sizing:border-box}
+#grid.count-1{grid-template-columns:1fr;grid-template-rows:1fr}
+#grid.count-2,#grid.count-3,#grid.count-4{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
+#grid.count-5,#grid.count-6,#grid.count-7,#grid.count-8,#grid.count-9{grid-template-columns:1fr 1fr 1fr;grid-template-rows:1fr 1fr 1fr}
+#grid.count-10,#grid.count-11,#grid.count-12,#grid.count-13,#grid.count-14,#grid.count-15,#grid.count-16{grid-template-columns:1fr 1fr 1fr 1fr;grid-template-rows:1fr 1fr 1fr 1fr}
+.slot-container{position:relative;background:#111;overflow:hidden;min-height:150px}
+.slot-container iframe{width:100%;height:100%;border:0;display:block}
+.slot-label{position:absolute;top:5px;left:5px;background:rgba(0,0,0,0.7);color:#fff;padding:4px 10px;border-radius:4px;font-size:12px;z-index:100;font-weight:500}
+.waiting{color:#666;display:flex;align-items:center;justify-content:center;height:100%;font-size:14px}
+#overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);
+  display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:999;flex-direction:column;gap:15px}
+#overlay .play-btn{background:#10b981;color:#fff;padding:20px 50px;border-radius:12px;font-size:20px;font-weight:600;box-shadow:0 4px 12px rgba(16,185,129,0.4)}
+#overlay .play-btn:hover{background:#059669;transform:scale(1.05);transition:all 0.2s}
+#overlay .count{color:#999;font-size:14px}
+#no-cameras{display:flex;align-items:center;justify-content:center;height:100%;color:#666;font-size:18px;flex-direction:column;gap:10px}
+#no-cameras .icon{font-size:48px;opacity:0.5}
+</style>
+</head><body>
+<div id="grid"></div>
+<div id="no-cameras" style="display:none">
+  <div class="icon">📹</div>
+  <div>No active cameras</div>
+  <div style="font-size:14px;color:#555">Cameras will appear here when they join</div>
+</div>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const grid=document.getElementById("grid");
+const noCameras=document.getElementById("no-cameras");
+let activeSlots={};
+let needsClick=true;
+
+function isOBS(){return /OBS|obslocal|obsbrowser/i.test(navigator.userAgent);}
+
+function render(){
+  // Get all active slots
+  const active=Object.entries(activeSlots).filter(([n,id])=>id).sort((a,b)=>+a[0]-(+b[0]));
+
+  if(active.length===0){
+    grid.style.display='none';
+    noCameras.style.display='flex';
+    return;
+  }
+
+  grid.style.display='grid';
+  noCameras.style.display='none';
+
+  // Update grid class for auto-scaling
+  grid.className='';
+  grid.classList.add(\`count-\${Math.min(active.length,16)}\`);
+
+  // Clear existing content
+  grid.innerHTML='';
+
+  // Create iframe for each active slot
+  active.forEach(([slotNum,streamId])=>{
+    const container=document.createElement("div");
+    container.className="slot-container";
+    container.dataset.slot=slotNum;
+
+    const label=document.createElement("div");
+    label.className="slot-label";
+    label.textContent=\`Camera \${slotNum}\`;
+    container.appendChild(label);
+
+    if(!streamId){
+      const waiting=document.createElement("div");
+      waiting.className="waiting";
+      waiting.textContent=\`Waiting for camera \${slotNum}...\`;
+      container.appendChild(waiting);
+    }else{
+      let url="${VDO}/?view="+encodeURIComponent(streamId)
+              +"&cleanoutput=1&stats=0&scene&autostart=1&coverview&relay";
+      if(!isOBS())url+="&muted=1";
+
+      const iframe=document.createElement("iframe");
+      iframe.allow="autoplay; camera; microphone; fullscreen; display-capture; encrypted-media; picture-in-picture";
+      iframe.setAttribute("allowfullscreen","");
+      iframe.src=url;
+      container.appendChild(iframe);
+    }
+
+    grid.appendChild(container);
+  });
+
+  // Add click-to-play overlay for browsers (not OBS) - only on first render
+  if(!isOBS() && needsClick && active.length>0){
+    const overlay=document.createElement("div");
+    overlay.id="overlay";
+    overlay.innerHTML=\`
+      <div class="play-btn">▶ Click to Play All Cameras</div>
+      <div class="count">\${active.length} camera\${active.length===1?'':'s'} active</div>
+    \`;
+    overlay.onclick=()=>{
+      needsClick=false;
+      overlay.remove();
+      // Reload all iframes to enable autoplay after user interaction
+      document.querySelectorAll('.slot-container iframe').forEach(f=>{
+        const oldSrc=f.src;
+        f.src='';
+        setTimeout(()=>f.src=oldSrc,100);
+      });
+    };
+    document.body.appendChild(overlay);
+  }
+}
+
+async function poll(){
+  try{
+    const j=await fetch("/api/state").then(r=>r.json());
+    activeSlots=j.slots||{};
+    render();
+  }catch(e){console.error("Poll error:",e);}
+}
+
+poll();
+const io_=io();
+io_.on("state",()=>{
+  console.log("State update received, refreshing...");
+  poll();
+});
+setInterval(poll,3000);  // Poll every 3 seconds
 </script></body></html>`);
 });
 

@@ -1,5 +1,9 @@
 {
   "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.6.1",
+    "qrcode": "^1.5.3",
+    "express-session": "^1.17.3",
     "ws": "^8.18.3"
   }
 }
