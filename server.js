@@ -1652,7 +1652,7 @@ function render(){
       waiting.textContent=\`Waiting for camera \${slotNum}...\`;
       container.appendChild(waiting);
     }else{
-      let url=\`${VDO}/?view=\${encodeURIComponent(streamId)}&cleanoutput=1&stats=0&scene&autostart=1&cover&relay\`;
+      let url=\`${VDO}/?view=\${encodeURIComponent(streamId)}&cleanoutput=1&stats=0&scene&autostart=1&relay\`;
       if(!isOBS())url+="&muted=1";
       console.log(\`Creating iframe for slot \${slotNum} with URL: \${url}\`);
 
@@ -1807,7 +1807,7 @@ function render(){
       waiting.textContent=\`Waiting for camera \${slotNum}...\`;
       container.appendChild(waiting);
     }else{
-      let url=\`${VDO}/?view=\${encodeURIComponent(streamId)}&cleanoutput=1&stats=0&scene&autostart=1&cover&relay\`;
+      let url=\`${VDO}/?view=\${encodeURIComponent(streamId)}&cleanoutput=1&stats=0&scene&autostart=1&relay\`;
       if(!isOBS())url+="&muted=1";
 
       const iframe=document.createElement("iframe");
