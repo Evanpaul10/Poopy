@@ -1455,7 +1455,10 @@ app.get("/control",requireAuth,async(req,res)=>{
       <div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px">
           <h3>Camera Slots</h3>
-          <button class="btn-clear-all" onclick="clearAllSlots()">Clear All Slots</button>
+          <div style="display:flex;gap:10px">
+            <a href="/group" target="_blank" class="btn-group" style="background:#10b981;color:#fff;padding:8px 20px;border-radius:6px;text-decoration:none;font-size:14px;font-weight:500;display:inline-block;border:none;cursor:pointer">📹 View Group Feed</a>
+            <button class="btn-clear-all" onclick="clearAllSlots()">Clear All Slots</button>
+          </div>
         </div>
         <table id="t"><tr><th>Slot</th><th>Status</th><th>Stream ID</th><th>Duration</th><th>Slot Link</th><th>Action</th></tr>${rowsHtml}</table>
       </div>
