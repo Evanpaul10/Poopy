@@ -1301,8 +1301,8 @@ let needsClick=true;
 function isOBS(){return /OBS|obslocal|obsbrowser/i.test(navigator.userAgent);}
 
 function slotsChanged(){
-  const curr=Object.entries(activeSlots).filter(([n,id])=>id).map(([n,id])=>n+':'+id).sort().join(',');
-  const prev=Object.entries(previousSlots).filter(([n,id])=>id).map(([n,id])=>n+':'+id).sort().join(',');
+  const curr=Object.entries(activeSlots).filter(([n,slot])=>slot).map(([n,slot])=>n+':'+(slot?.streamId||'')).sort().join(',');
+  const prev=Object.entries(previousSlots).filter(([n,slot])=>slot).map(([n,slot])=>n+':'+(slot?.streamId||'')).sort().join(',');
   return curr!==prev;
 }
 
@@ -1335,7 +1335,8 @@ function render(){
   grid.innerHTML='';
 
   // Create iframe for each active slot
-  active.forEach(([slotNum,streamId])=>{
+  active.forEach(([slotNum,slot])=>{
+    const streamId=slot?.streamId;
     const container=document.createElement("div");
     container.className="slot-container";
     container.dataset.slot=slotNum;
