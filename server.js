@@ -1446,7 +1446,7 @@ function render(id){
   if(id===cur)return;cur=id;wrap.innerHTML="";
   if(!id){wrap.innerHTML='<div class="waiting">Waiting for camera ${n}…</div>';return;}
 
-  let url=\`${VDO}/?view=\${encodeURIComponent(id)}&cleanoutput=1&stats=0&autostart=1&cover&relay\`;
+  let url=\`${VDO}/?view=\${encodeURIComponent(id)}&cleanoutput=1&stats=0&autostart=1&relay\`;
   if(!isOBS())url+="&muted=1";
 
   console.log("Loading VDO.Ninja viewer for stream:",id);
@@ -1652,7 +1652,7 @@ function render(){
       waiting.textContent=\`Waiting for camera \${slotNum}...\`;
       container.appendChild(waiting);
     }else{
-      let url=\`${VDO}/?view=\${encodeURIComponent(streamId)}&cleanoutput=1&stats=0&autostart=1&cover&relay\`;
+      let url=\`${VDO}/?view=\${encodeURIComponent(streamId)}&cleanoutput=1&stats=0&autostart=1&relay\`;
       if(!isOBS())url+="&muted=1";
       console.log(\`Creating iframe for slot \${slotNum} with URL: \${url}\`);
 
@@ -1807,7 +1807,7 @@ function render(){
       waiting.textContent=\`Waiting for camera \${slotNum}...\`;
       container.appendChild(waiting);
     }else{
-      let url=\`${VDO}/?view=\${encodeURIComponent(streamId)}&cleanoutput=1&stats=0&autostart=1&cover&relay\`;
+      let url=\`${VDO}/?view=\${encodeURIComponent(streamId)}&cleanoutput=1&stats=0&autostart=1&relay\`;
       if(!isOBS())url+="&muted=1";
 
       const iframe=document.createElement("iframe");
