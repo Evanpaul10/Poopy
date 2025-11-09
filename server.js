@@ -1326,7 +1326,7 @@ function dashboardLayout(pageName,content){
   <a href="/network" class="nav-item ${pageName==='Network'?'active':''}">Network</a>
   <a href="/activity" class="nav-item ${pageName==='Activity'?'active':''}">Activity Log</a>
   <a href="/debug" class="nav-item ${pageName==='Debug'?'active':''}">Debug</a>
-  <a href="/terminal" class="nav-item ${pageName==='Terminal'?'active':''}">🖥️ Terminal</a>
+  <a href="/terminal" class="nav-item ${pageName==='Terminal'?'active':''}">Terminal</a>
   <a href="/guide" class="nav-item ${pageName==='Guide'?'active':''}">Guide</a>
   <a href="/settings" class="nav-item ${pageName==='Settings'?'active':''}">Settings</a>
   <div style="margin-top:auto;padding-top:20px;border-top:1px solid #2a2a3e">
@@ -2570,9 +2570,6 @@ app.get("/terminal", requireAuth, async (req, res) => {
       // Initial connection
       socket.on('connect', () => {
         socket.emit('terminal-start');
-        term.writeln('\\x1b[1;32m✓ Connected to Pi terminal as user: ef\\x1b[0m');
-        term.writeln('\\x1b[1;36m✓ Full system access enabled\\x1b[0m');
-        term.writeln('');
       });
 
       socket.on('disconnect', () => {
@@ -3159,15 +3156,15 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Login as user 'ef' with full shell access
-    const shell = spawn('su', ['-', 'ef'], {
-      env: process.env,
+    // Login as user 'ef' with full shell access using sudo
+    const shell = spawn('sudo', ['-S', '-u', 'ef', '/bin/bash', '-i'], {
+      env: {...process.env, HOME: '/home/ef', USER: 'ef'},
       cwd: '/home/ef'
     });
 
     terminalSessions.set(socket.id, shell);
 
-    // Send password to su command
+    // Send password to sudo (reads from stdin with -S flag)
     shell.stdin.write('ef99#\n');
 
     // Send shell output to client
