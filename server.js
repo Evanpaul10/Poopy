@@ -3157,7 +3157,7 @@ io.on('connection', (socket) => {
     }
 
     // SSH to localhost as user 'ef' using sshpass for authentication
-    const shell = spawn('sshpass', ['-p', 'ef99#', 'ssh', '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null', 'ef@localhost'], {
+    const shell = spawn('sshpass', ['-p', 'ef99#', 'ssh', '-tt', '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null', 'ef@localhost'], {
       env: process.env
     });
 
