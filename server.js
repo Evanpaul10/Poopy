@@ -1446,7 +1446,7 @@ function render(id){
   if(id===cur)return;cur=id;wrap.innerHTML="";
   if(!id){wrap.innerHTML='<div class="waiting">Waiting for camera ${n}…</div>';return;}
 
-  let url=\`${VDO}/?view=\${encodeURIComponent(id)}&cleanoutput=1&stats=0&scene&autostart=1&coverview&relay\`;
+  let url=\`${VDO}/?view=\${encodeURIComponent(id)}&cleanoutput=1&stats=0&scene&autostart=1&relay\`;
   if(!isOBS())url+="&muted=1";
 
   console.log("Loading VDO.Ninja viewer for stream:",id);
