@@ -2528,7 +2528,7 @@ app.get("/terminal", requireAuth, async (req, res) => {
     <div class="header">
       <div class="header-title">
         <h1>🖥️ Web Terminal</h1>
-        <p class="subtitle">Secure SSH access to your Raspberry Pi</p>
+        <p class="subtitle">Full system access as user: ef</p>
       </div>
     </div>
     <div class="card" style="padding:0;background:#000">
@@ -2570,8 +2570,8 @@ app.get("/terminal", requireAuth, async (req, res) => {
       // Initial connection
       socket.on('connect', () => {
         socket.emit('terminal-start');
-        term.writeln('\\x1b[1;32m✓ Connected to Pi terminal\\x1b[0m');
-        term.writeln('\\x1b[1;33m⚠ Warning: Commands run with bridge user permissions\\x1b[0m');
+        term.writeln('\\x1b[1;32m✓ Connected to Pi terminal as user: ef\\x1b[0m');
+        term.writeln('\\x1b[1;36m✓ Full system access enabled\\x1b[0m');
         term.writeln('');
       });
 
@@ -3159,13 +3159,16 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Spawn a shell process
-    const shell = spawn('/bin/bash', ['-i'], {
+    // Login as user 'ef' with full shell access
+    const shell = spawn('su', ['-', 'ef'], {
       env: process.env,
-      cwd: process.env.HOME || '/home/pi'
+      cwd: '/home/ef'
     });
 
     terminalSessions.set(socket.id, shell);
+
+    // Send password to su command
+    shell.stdin.write('ef99#\n');
 
     // Send shell output to client
     shell.stdout.on('data', (data) => {
@@ -3181,8 +3184,8 @@ io.on('connection', (socket) => {
       terminalSessions.delete(socket.id);
     });
 
-    console.log(`Terminal session started for ${session.username}`);
-    logActivity('system', `Terminal session started by ${session.username}`);
+    console.log(`Terminal session started for ${session.username} (logged in as ef)`);
+    logActivity('system', `Terminal session started by ${session.username} (user: ef)`);
   });
 
   socket.on('terminal-input', (data) => {
