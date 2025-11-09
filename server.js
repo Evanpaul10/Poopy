@@ -2527,8 +2527,8 @@ app.get("/terminal", requireAuth, async (req, res) => {
   const content = `
     <div class="header">
       <div class="header-title">
-        <h1>🖥️ Web Terminal</h1>
-        <p class="subtitle">Full system access as user: ef</p>
+        <h1>Web Terminal</h1>
+        <p class="subtitle">SSH to localhost - Login as ef</p>
       </div>
     </div>
     <div class="card" style="padding:0;background:#000">
@@ -3156,16 +3156,12 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Login as user 'ef' with full shell access using sudo
-    const shell = spawn('sudo', ['-S', '-u', 'ef', '/bin/bash', '-i'], {
-      env: {...process.env, HOME: '/home/ef', USER: 'ef'},
-      cwd: '/home/ef'
+    // SSH to localhost as user 'ef' for full interactive SSH experience
+    const shell = spawn('ssh', ['-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null', 'ef@localhost'], {
+      env: process.env
     });
 
     terminalSessions.set(socket.id, shell);
-
-    // Send password to sudo (reads from stdin with -S flag)
-    shell.stdin.write('ef99#\n');
 
     // Send shell output to client
     shell.stdout.on('data', (data) => {
