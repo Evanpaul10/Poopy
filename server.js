@@ -1416,10 +1416,8 @@ document.getElementById("go").onclick=async()=>{
     return alert("All slots full");
   }
   const n=j.slot;
-  const thanksUrl="${PUBLIC_HOST}/thanks";
   const vdoUrl="${VDO}/?push="+encodeURIComponent(streamId)
-             +"&label=cam"+n+"&bitrate=${SETTINGS.bitrate}&codec=h264&autostart&webcam&muted&relay"
-             +"&close="+encodeURIComponent(thanksUrl);
+             +"&label=cam"+n+"&bitrate=${SETTINGS.bitrate}&codec=h264&autostart&webcam&muted&relay&closetab";
   console.log("Opening VDO.Ninja pusher:",vdoUrl);
   w.location=vdoUrl;
 
