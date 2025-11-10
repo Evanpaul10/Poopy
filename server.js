@@ -1380,8 +1380,16 @@ app.get("/join",(req,res)=>{
 <div class="container">
   <h1>📹 Merimac Live</h1>
   <p class="subtitle">Join the show as a camera</p>
+  <div style="background:rgba(255,255,255,0.15);padding:20px;border-radius:12px;margin-bottom:2em;text-align:left">
+    <strong style="font-size:1.1em">Instructions:</strong>
+    <ol style="margin-left:20px;margin-top:10px;line-height:2">
+      <li>Press Join</li>
+      <li>Allow all camera permissions</li>
+    </ol>
+  </div>
   <button id="go">Join Now</button>
   <p id="msg">Tap the button above to get started</p>
+  <p style="margin-top:2em;opacity:0.9">Check out our website: <a href="https://merimac.ca" target="_blank" style="color:#fff;font-weight:600;text-decoration:underline">merimac.ca</a></p>
 </div>
 <script>
 // Generate a unique stream ID for this device
@@ -1418,8 +1426,47 @@ document.getElementById("go").onclick=async()=>{
   heartbeatInterval=setInterval(()=>post("/api/heartbeat",{streamId},true),2000);
 
   document.getElementById("msg").innerHTML='<div class="status">✅ Connected as Camera '+n+'</div><br>Keep this page open while streaming.';
+
+  // Check if camera window is closed, then redirect to thanks page
+  const checkInterval=setInterval(()=>{
+    if(w.closed){
+      clearInterval(checkInterval);
+      clearInterval(heartbeatInterval);
+      window.location.href="/thanks";
+    }
+  },1000);
 };
 </script></body></html>`);
+});
+
+app.get("/thanks",(req,res)=>{
+  res.send(`<!doctype html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Thanks for Joining!</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);
+    color:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+  .container{text-align:center;max-width:500px;width:100%}
+  h1{font-size:2.5em;margin-bottom:0.5em;font-weight:700}
+  .message{font-size:1.2em;line-height:1.8;margin-bottom:2em;opacity:0.95}
+  .website-link{display:inline-block;background:#fff;color:#667eea;text-decoration:none;
+    padding:15px 40px;border-radius:50px;font-size:1.2em;font-weight:600;
+    box-shadow:0 10px 30px rgba(0,0,0,0.3);transition:all 0.3s ease;margin-top:1em}
+  .website-link:hover{transform:translateY(-2px);box-shadow:0 15px 40px rgba(0,0,0,0.4)}
+  .icon{font-size:4em;margin-bottom:0.5em;animation:bounce 2s infinite}
+  @keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
+</style>
+</head><body>
+<div class="container">
+  <div class="icon">🎉</div>
+  <h1>Thanks for Joining!</h1>
+  <p class="message">We appreciate you being part of Merimac Live.<br>Your stream has ended successfully.</p>
+  <a href="https://merimac.ca" class="website-link">Visit merimac.ca</a>
+  <p style="margin-top:2em;opacity:0.8;font-size:0.95em">Want to join again? Head back to the event!</p>
+</div>
+</body></html>`);
 });
 
 app.get("/slot/:n",(req,res)=>{
