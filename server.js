@@ -1,5 +1,5 @@
 /****************************************************************
- * Merimac VDO.Ninja Bridge — Fixed Browser Autoplay (Nov 2025)
+ * Merimac VDO.Ninja Bridge — Enhanced Security & Performance
  ****************************************************************/
 const express = require("express");
 const http = require("http");
@@ -7,16 +7,34 @@ const { Server } = require("socket.io");
 const QRCode = require("qrcode");
 const session = require("express-session");
 const fs = require("fs");
+const fsPromises = require("fs").promises;
 const path = require("path");
 const WebSocket = require("ws");
+const crypto = require("crypto");
+const {exec} = require("child_process");
+const util = require("util");
+const execAsync = util.promisify(exec);
+const net = require("net");
+const os = require("os");
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
 
-const PORT = 8080;
-const PUBLIC_HOST = "https://bridge.merimac.ca";
-const VDO = "https://vdo.ninja";
+// Trust proxy for Cloudflare
+app.set('trust proxy', true);
+
+const PUBLIC_HOST = process.env.PUBLIC_HOST || "https://bridge.merimac.ca";
+
+// Configure Socket.IO with proper CORS
+const io = new Server(server, {
+  cors: {
+    origin: PUBLIC_HOST,
+    credentials: true
+  }
+});
+
+const PORT = process.env.PORT || 8080;
+const VDO = process.env.VDO_NINJA || "https://vdo.ninja";
 const ROOM = "MERIMAC";
 
 const INACTIVITY_MS = 8_000;  // Clear inactive slots after 8 seconds
@@ -26,6 +44,22 @@ const GRACE_MS = 5_000;        // 5 second grace period on initial connection
 const SETTINGS_FILE = path.join(__dirname, 'bridge-settings.json');
 const ACTIVITY_LOG_FILE = path.join(__dirname, 'activity-log.json');
 const CAMERAS_FILE = path.join(__dirname, 'camera-control.json');
+const SESSION_SECRET_FILE = path.join(__dirname, '.session-secret');
+
+// Generate or load session secret
+let SESSION_SECRET;
+try {
+  if (fs.existsSync(SESSION_SECRET_FILE)) {
+    SESSION_SECRET = fs.readFileSync(SESSION_SECRET_FILE, 'utf8');
+  } else {
+    SESSION_SECRET = crypto.randomBytes(64).toString('hex');
+    fs.writeFileSync(SESSION_SECRET_FILE, SESSION_SECRET);
+    console.log('Generated new session secret');
+  }
+} catch (e) {
+  console.error('Error with session secret:', e.message);
+  SESSION_SECRET = crypto.randomBytes(64).toString('hex');
+}
 
 // Default settings
 let SETTINGS = {
@@ -39,6 +73,7 @@ let SETTINGS = {
 
 // Activity log (in-memory with file backup)
 let ACTIVITY_LOG = [];
+let activityLogSaveTimeout = null;
 
 // Camera control storage
 let CAMERAS = []; // Array of {id, name, ip, connected, lastSeen, settings}
@@ -46,6 +81,56 @@ const cameraConnections = new Map(); // ip -> WebSocket connection
 
 // Login attempt tracking for rate limiting
 const loginAttempts = new Map(); // IP -> {count, lastAttempt, lockedUntil}
+
+// Track active slots for efficient cleanup
+const activeSlots = new Set();
+
+// Rate limiting storage
+const rateLimits = new Map(); // IP -> { claim: [], heartbeat: [], leave: [] }
+
+// Bandwidth tracking
+const bandwidthStats = {}; // slotNum -> { bytesTransferred, startTime, lastUpdate }
+
+// Rate limiting function
+function checkRateLimit(ip, endpoint, maxRequests, windowMs) {
+  if (!rateLimits.has(ip)) {
+    rateLimits.set(ip, { claim: [], heartbeat: [], leave: [] });
+  }
+
+  const now = Date.now();
+  const requests = rateLimits.get(ip)[endpoint];
+
+  // Remove old requests outside the window
+  while (requests.length > 0 && now - requests[0] > windowMs) {
+    requests.shift();
+  }
+
+  // Check if limit exceeded
+  if (requests.length >= maxRequests) {
+    return false;
+  }
+
+  // Add current request
+  requests.push(now);
+  return true;
+}
+
+// Cleanup old rate limit entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, endpoints] of rateLimits.entries()) {
+    let hasRecent = false;
+    for (const requests of Object.values(endpoints)) {
+      if (requests.length > 0 && now - requests[0] <= 60000) {
+        hasRecent = true;
+        break;
+      }
+    }
+    if (!hasRecent) {
+      rateLimits.delete(ip);
+    }
+  }
+}, 300000);
 
 // Load settings from file
 function loadSettings() {
@@ -61,10 +146,10 @@ function loadSettings() {
   }
 }
 
-// Save settings to file
-function saveSettings() {
+// Save settings to file (async)
+async function saveSettings() {
   try {
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(SETTINGS, null, 2));
+    await fsPromises.writeFile(SETTINGS_FILE, JSON.stringify(SETTINGS, null, 2));
     console.log('Settings saved to file');
   } catch (e) {
     console.error('Error saving settings:', e.message);
@@ -88,13 +173,22 @@ function loadActivityLog() {
   }
 }
 
-// Save activity log
-function saveActivityLog() {
+// Save activity log (async with debouncing)
+async function saveActivityLog() {
   try {
-    fs.writeFileSync(ACTIVITY_LOG_FILE, JSON.stringify(ACTIVITY_LOG, null, 2));
+    await fsPromises.writeFile(ACTIVITY_LOG_FILE, JSON.stringify(ACTIVITY_LOG, null, 2));
   } catch (e) {
     console.error('Error saving activity log:', e.message);
   }
+}
+
+function debouncedSaveActivityLog() {
+  if (activityLogSaveTimeout) {
+    clearTimeout(activityLogSaveTimeout);
+  }
+  activityLogSaveTimeout = setTimeout(() => {
+    saveActivityLog();
+  }, 5000); // Save after 5 seconds of no activity
 }
 
 // Add activity log entry
@@ -110,10 +204,8 @@ function logActivity(type, message, slotNumber = null) {
   if (ACTIVITY_LOG.length > 500) {
     ACTIVITY_LOG.shift();
   }
-  // Save periodically (every 10 entries)
-  if (ACTIVITY_LOG.length % 10 === 0) {
-    saveActivityLog();
-  }
+  // Debounced save (saves after 5 seconds of no new activity)
+  debouncedSaveActivityLog();
   // Emit to connected clients
   io.emit('activity', entry);
 }
@@ -131,10 +223,10 @@ function loadCameras() {
   }
 }
 
-// Save cameras to file
-function saveCameras() {
+// Save cameras to file (async)
+async function saveCameras() {
   try {
-    fs.writeFileSync(CAMERAS_FILE, JSON.stringify(CAMERAS, null, 2));
+    await fsPromises.writeFile(CAMERAS_FILE, JSON.stringify(CAMERAS, null, 2));
     console.log('Cameras saved to file');
   } catch (e) {
     console.error('Error saving cameras:', e.message);
@@ -149,16 +241,36 @@ loadCameras();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Session middleware
-app.use(session({
-  secret: 'merimac-bridge-secret-key-change-in-production',
+// HTTPS enforcement middleware (skip if behind Cloudflare or in dev)
+app.use((req, res, next) => {
+  // Skip if already HTTPS or if behind Cloudflare (which handles HTTPS)
+  if (req.secure || req.headers['x-forwarded-proto'] === 'https' || process.env.NODE_ENV === 'development') {
+    return next();
+  }
+
+  // Redirect to HTTPS
+  const httpsUrl = `https://${req.headers.host}${req.url}`;
+  console.log(`Redirecting HTTP to HTTPS: ${httpsUrl}`);
+  res.redirect(301, httpsUrl);
+});
+
+// Session middleware with secure secret
+const sessionMiddleware = session({
+  secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
   cookie: {
     secure: false, // Set to true if using HTTPS directly (Cloudflare tunnel handles this)
-    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    httpOnly: true,
+    sameSite: 'lax'
   }
-}));
+});
+
+app.use(sessionMiddleware);
+
+// Share session with Socket.IO
+io.engine.use(sessionMiddleware);
 
 const SLOTS = {};
 for(let i=1;i<=50;i++)SLOTS[i]=null;
@@ -174,17 +286,91 @@ function requireAuth(req, res, next) {
   res.redirect('/login');
 }
 
-function now(){return Date.now();}
-function firstFree(){for(let i=1;i<=MAX_SLOTS;i++) if(!SLOTS[i]) return i; return null;}
-function claim(streamId,label){
-  const id=String(streamId).replace(/[^a-zA-Z0-9]/g,"");
-  if(deviceIndex.has(id)){const n=deviceIndex.get(id);SLOTS[n].last=now();return n;}
-  const n=firstFree(); if(!n)return null;
-  SLOTS[n]={streamId:id,label:label||"cam",since:now(),last:now(),grace:now()+GRACE_MS};
-  deviceIndex.set(id,n); return n;
+// Helper functions
+function now() {
+  return Date.now();
 }
-function clearSlot(n){if(SLOTS[n]){deviceIndex.delete(SLOTS[n].streamId);SLOTS[n]=null;}}
-function clearById(id){const n=deviceIndex.get(id);if(!n)return;deviceIndex.delete(id);SLOTS[n]=null;return true;}
+
+function firstFree() {
+  for (let i = 1; i <= MAX_SLOTS; i++) {
+    if (!SLOTS[i]) return i;
+  }
+  return null;
+}
+
+function claim(streamId, label) {
+  const id = String(streamId).replace(/[^a-zA-Z0-9]/g, "");
+  if (!id) return null;
+
+  // Update existing slot
+  if (deviceIndex.has(id)) {
+    const n = deviceIndex.get(id);
+    SLOTS[n].last = now();
+    return n;
+  }
+
+  // Find free slot
+  const n = firstFree();
+  if (!n) return null;
+
+  // Claim slot
+  SLOTS[n] = {
+    streamId: id,
+    label: (label || "cam").replace(/[<>]/g, ""), // Sanitize label
+    since: now(),
+    last: now(),
+    grace: now() + GRACE_MS
+  };
+  deviceIndex.set(id, n);
+  activeSlots.add(n);
+
+  // Initialize bandwidth tracking
+  bandwidthStats[n] = {
+    bytesTransferred: 0,
+    startTime: now(),
+    lastUpdate: now()
+  };
+
+  return n;
+}
+
+function clearSlot(n) {
+  if (SLOTS[n]) {
+    deviceIndex.delete(SLOTS[n].streamId);
+    SLOTS[n] = null;
+    activeSlots.delete(n);
+    delete bandwidthStats[n];
+  }
+}
+
+function clearById(id) {
+  const n = deviceIndex.get(id);
+  if (!n) return;
+  deviceIndex.delete(id);
+  SLOTS[n] = null;
+  activeSlots.delete(n);
+  delete bandwidthStats[n];
+  return true;
+}
+
+// Update bandwidth stats (called periodically)
+function updateBandwidthStats() {
+  const currentTime = now();
+  for (const slotNum of activeSlots) {
+    const slot = SLOTS[slotNum];
+    const stats = bandwidthStats[slotNum];
+    if (slot && stats) {
+      const elapsedSeconds = (currentTime - stats.lastUpdate) / 1000;
+      // Estimate: bitrate (kbps) * elapsed seconds / 8 = KB
+      const estimatedKB = (SETTINGS.bitrate * elapsedSeconds) / 8;
+      stats.bytesTransferred += estimatedKB * 1024; // Convert to bytes
+      stats.lastUpdate = currentTime;
+    }
+  }
+}
+
+// Update bandwidth every 10 seconds
+setInterval(updateBandwidthStats, 10000);
 
 // Root route - redirect to control page
 app.get("/", (req, res) => {
@@ -303,9 +489,17 @@ app.get("/logout", (req, res) => {
 // Forgot password page
 app.get("/forgot-password", (req, res) => {
   const error = req.query.error;
-  const success = req.query.success;
-  const username = req.query.u || '';
-  const password = req.query.p || '';
+  // Use session to store credentials temporarily (more secure than URL)
+  const username = req.session.resetUsername || '';
+  const password = req.session.resetPassword || '';
+  const success = username && password;
+
+  // Clear session data after displaying
+  if (success) {
+    delete req.session.resetUsername;
+    delete req.session.resetPassword;
+  }
+
   res.send(`<!doctype html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Reset Password - Merimac Bridge</title>
@@ -357,53 +551,80 @@ app.get("/forgot-password", (req, res) => {
 </body></html>`);
 });
 
-// Forgot password POST
+// Forgot password POST (secure - uses session instead of URL)
 app.post("/forgot-password", (req, res) => {
   const { pin } = req.body;
   if (pin === SETTINGS.resetPin) {
-    res.redirect('/forgot-password?success=1&u=' + encodeURIComponent(SETTINGS.username) + '&p=' + encodeURIComponent(SETTINGS.password));
+    // Store in session temporarily instead of URL
+    req.session.resetUsername = SETTINGS.username;
+    req.session.resetPassword = SETTINGS.password;
+    res.redirect('/forgot-password');
   } else {
     res.redirect('/forgot-password?error=1');
   }
 });
 
 app.get("/api/state",(r,s)=>s.json({slots:SLOTS,maxSlots:MAX_SLOTS}));
-app.post("/api/config",requireAuth,(r,s)=>{
-  const {maxSlots}=r.body||{};
-  if(maxSlots&&maxSlots>=1&&maxSlots<=50){
-    MAX_SLOTS=maxSlots;
-    SETTINGS.maxSlots=maxSlots;
-    saveSettings();
+app.post("/api/config", requireAuth, async (r, s) => {
+  const {maxSlots} = r.body || {};
+  if (maxSlots && Number.isInteger(maxSlots) && maxSlots >= 1 && maxSlots <= 50) {
+    MAX_SLOTS = maxSlots;
+    SETTINGS.maxSlots = maxSlots;
+    await saveSettings();
     logActivity('system', `Max slots changed to ${maxSlots}`);
-    s.json({ok:true,maxSlots:MAX_SLOTS});
-  }else{
-    s.json({ok:false,error:"maxSlots must be between 1 and 50"});
+    s.json({ok: true, maxSlots: MAX_SLOTS});
+  } else {
+    s.json({ok: false, error: "maxSlots must be an integer between 1 and 50"});
   }
 });
-app.post("/api/claim",(r,s)=>{
-  const {streamId,label}=r.body||{};
-  if(!streamId)return s.json({ok:false});
-  const n=claim(streamId,label);
-  if(!n)return s.json({ok:false,error:"full"});
+// Public APIs with rate limiting
+app.post("/api/claim", (r, s) => {
+  const ip = r.ip || r.connection.remoteAddress;
+
+  // Rate limit: max 10 claims per minute per IP
+  if (!checkRateLimit(ip, 'claim', 10, 60000)) {
+    return s.status(429).json({ok: false, error: "Rate limit exceeded. Max 10 claims per minute."});
+  }
+
+  const {streamId, label} = r.body || {};
+  if (!streamId) return s.json({ok: false});
+
+  const n = claim(streamId, label);
+  if (!n) return s.json({ok: false, error: "full"});
+
   logActivity('join', `Camera joined slot ${n}`, n);
-  io.emit("state",{slots:SLOTS});
-  s.json({ok:true,slot:n});
+  io.emit("state", {slots: SLOTS});
+  s.json({ok: true, slot: n});
 });
-app.post("/api/heartbeat",(r,s)=>{
-  const id=(r.body?.streamId||"").replace(/[^a-zA-Z0-9]/g,"");
-  const n=deviceIndex.get(id);
-  if(n&&SLOTS[n]){SLOTS[n].last=now();io.emit("state",{slots:SLOTS});}
-  s.json({ok:true});
-});
-app.post("/api/leave",(r,s)=>{
-  const id=(r.body?.streamId||"").replace(/[^a-zA-Z0-9]/g,"");
-  const n=deviceIndex.get(id);
-  const c=clearById(id);
-  if(c){
-    logActivity('leave', `Camera left slot ${n}`, n);
-    io.emit("state",{slots:SLOTS});
+
+app.post("/api/heartbeat", (r, s) => {
+  // No rate limiting on heartbeat - it's already protected by streamId validation
+  // and limited by the number of available slots
+  const id = (r.body?.streamId || "").replace(/[^a-zA-Z0-9]/g, "");
+  const n = deviceIndex.get(id);
+  if (n && SLOTS[n]) {
+    SLOTS[n].last = now();
+    io.emit("state", {slots: SLOTS});
   }
-  s.json({ok:!!c});
+  s.json({ok: true});
+});
+
+app.post("/api/leave", (r, s) => {
+  const ip = r.ip || r.connection.remoteAddress;
+
+  // Rate limit: max 10 leaves per minute per IP
+  if (!checkRateLimit(ip, 'leave', 10, 60000)) {
+    return s.status(429).json({ok: false, error: "Rate limit exceeded"});
+  }
+
+  const id = (r.body?.streamId || "").replace(/[^a-zA-Z0-9]/g, "");
+  const n = deviceIndex.get(id);
+  const c = clearById(id);
+  if (c) {
+    logActivity('leave', `Camera left slot ${n}`, n);
+    io.emit("state", {slots: SLOTS});
+  }
+  s.json({ok: !!c});
 });
 app.post("/api/clear/:n",requireAuth,(r,s)=>{
   const n=+r.params.n;
@@ -414,7 +635,42 @@ app.post("/api/clear/:n",requireAuth,(r,s)=>{
   }
   s.json({ok:true});
 });
-app.get("/health",(r,s)=>s.json({ok:true,active:Object.values(SLOTS).filter(Boolean).length}));
+app.get("/health", (r, s) => {
+  const uptime = process.uptime();
+  const memUsage = process.memoryUsage();
+  s.json({
+    ok: true,
+    uptime: Math.floor(uptime),
+    active: activeSlots.size,
+    memory: {
+      heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024) + ' MB',
+      heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024) + ' MB'
+    },
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Bandwidth monitoring API
+app.get("/api/bandwidth", requireAuth, (r, s) => {
+  const stats = [];
+  for (const slotNum of activeSlots) {
+    const slot = SLOTS[slotNum];
+    const bw = bandwidthStats[slotNum];
+    if (slot && bw) {
+      const durationSeconds = (now() - bw.startTime) / 1000;
+      const megabytes = (bw.bytesTransferred / 1024 / 1024).toFixed(2);
+      stats.push({
+        slot: slotNum,
+        label: slot.label,
+        bytesTransferred: bw.bytesTransferred,
+        megabytes: parseFloat(megabytes),
+        durationSeconds: Math.floor(durationSeconds),
+        averageKbps: durationSeconds > 0 ? Math.round((bw.bytesTransferred * 8) / durationSeconds / 1000) : 0
+      });
+    }
+  }
+  s.json({stats});
+});
 
 // Settings API
 app.get("/api/settings",requireAuth,(r,s)=>{
@@ -424,37 +680,57 @@ app.get("/api/settings",requireAuth,(r,s)=>{
   });
 });
 
-app.post("/api/settings",requireAuth,(r,s)=>{
-  const {bitrate, networkRefreshInterval, username, password, resetPin}=r.body||{};
+app.post("/api/settings", requireAuth, async (r, s) => {
+  const {bitrate, networkRefreshInterval, username, password, resetPin} = r.body || {};
 
-  // Update bitrate
-  if(bitrate && bitrate >= 500 && bitrate <= 10000){
-    SETTINGS.bitrate = bitrate;
+  // Update bitrate with proper validation
+  if (bitrate !== undefined) {
+    if (Number.isInteger(bitrate) && bitrate >= 500 && bitrate <= 10000) {
+      SETTINGS.bitrate = bitrate;
+    } else {
+      return s.json({ok: false, error: "Bitrate must be an integer between 500 and 10000"});
+    }
   }
 
   // Update network refresh interval
-  if(networkRefreshInterval && networkRefreshInterval >= 1 && networkRefreshInterval <= 60){
-    SETTINGS.networkRefreshInterval = networkRefreshInterval;
+  if (networkRefreshInterval !== undefined) {
+    if (Number.isInteger(networkRefreshInterval) && networkRefreshInterval >= 1 && networkRefreshInterval <= 60) {
+      SETTINGS.networkRefreshInterval = networkRefreshInterval;
+    } else {
+      return s.json({ok: false, error: "Network refresh interval must be an integer between 1 and 60"});
+    }
   }
 
-  // Update credentials
-  if(username && username.length >= 3){
-    SETTINGS.username = username;
-    logActivity('system', `Username changed to ${username}`);
+  // Update credentials with validation
+  if (username !== undefined) {
+    if (typeof username === 'string' && username.length >= 3 && username.length <= 50 && /^[a-zA-Z0-9_-]+$/.test(username)) {
+      SETTINGS.username = username;
+      logActivity('system', `Username changed to ${username}`);
+    } else {
+      return s.json({ok: false, error: "Username must be 3-50 alphanumeric characters"});
+    }
   }
 
-  if(password && password.length >= 6){
-    SETTINGS.password = password;
-    logActivity('system', 'Password changed');
+  if (password !== undefined) {
+    if (typeof password === 'string' && password.length >= 6 && password.length <= 100) {
+      SETTINGS.password = password;
+      logActivity('system', 'Password changed');
+    } else {
+      return s.json({ok: false, error: "Password must be 6-100 characters"});
+    }
   }
 
-  if(resetPin && /^\d{6}$/.test(resetPin)){
-    SETTINGS.resetPin = resetPin;
-    logActivity('system', 'Reset PIN changed');
+  if (resetPin !== undefined) {
+    if (/^\d{6}$/.test(resetPin)) {
+      SETTINGS.resetPin = resetPin;
+      logActivity('system', 'Reset PIN changed');
+    } else {
+      return s.json({ok: false, error: "Reset PIN must be exactly 6 digits"});
+    }
   }
 
-  saveSettings();
-  s.json({ok:true, settings: {bitrate: SETTINGS.bitrate, networkRefreshInterval: SETTINGS.networkRefreshInterval}});
+  await saveSettings();
+  s.json({ok: true, settings: {bitrate: SETTINGS.bitrate, networkRefreshInterval: SETTINGS.networkRefreshInterval}});
 });
 
 // Clear all slots API
@@ -472,9 +748,10 @@ app.post("/api/clear-all",requireAuth,(r,s)=>{
 });
 
 // Activity log API
-app.get("/api/activity",requireAuth,(r,s)=>{
-  const limit = parseInt(r.query.limit) || 100;
-  const logs = ACTIVITY_LOG.slice(-limit).reverse();
+app.get("/api/activity", requireAuth, (r, s) => {
+  const limit = parseInt(r.query.limit, 10) || 100;
+  const safeLimit = Math.min(Math.max(limit, 1), 500); // Clamp between 1 and 500
+  const logs = ACTIVITY_LOG.slice(-safeLimit).reverse();
   s.json({logs});
 });
 
@@ -483,19 +760,14 @@ app.get("/api/cameras",requireAuth,(r,s)=>{
   s.json({cameras: CAMERAS});
 });
 
-app.post("/api/cameras/scan",requireAuth,async(r,s)=>{
-  const {exec}=require("child_process");
-  const util=require("util");
-  const execAsync=util.promisify(exec);
-  const net=require("net");
-
-  try{
-    const foundCameras=[];
-    const {customSubnet}=r.body||{};
+app.post("/api/cameras/scan", requireAuth, async (r, s) => {
+  // Modules already required at top of file
+  try {
+    const foundCameras = [];
+    const {customSubnet} = r.body || {};
 
     // Get all network interfaces
-    const os=require("os");
-    const interfaces=os.networkInterfaces();
+    const interfaces = os.networkInterfaces();
     const subnets=new Set();
     const localIPs=new Set();
 
@@ -1049,12 +1321,12 @@ function dashboardLayout(pageName,content){
 </head><body>
 <div class="sidebar">
   <div class="sidebar-title">Merimac Bridge</div>
-  <a href="/control" class="nav-item ${pageName==='Control'?'active':''}">Control</a>
-  <a href="/group" class="nav-item ${pageName==='Group Feed'?'active':''}" target="_blank">Group Feed</a>
-  <a href="/camera-control" class="nav-item ${pageName==='Camera Control'?'active':''}">Camera Control</a>
+  <a href="/control" class="nav-item ${pageName==='Audience Cam Control'?'active':''}">Audience Cam Control</a>
+  <a href="/camera-control" class="nav-item ${pageName==='OBS CAM Control'?'active':''}">OBS CAM Control</a>
   <a href="/network" class="nav-item ${pageName==='Network'?'active':''}">Network</a>
   <a href="/activity" class="nav-item ${pageName==='Activity'?'active':''}">Activity Log</a>
   <a href="/debug" class="nav-item ${pageName==='Debug'?'active':''}">Debug</a>
+  <a href="/terminal" class="nav-item ${pageName==='Terminal'?'active':''}">Terminal</a>
   <a href="/guide" class="nav-item ${pageName==='Guide'?'active':''}">Guide</a>
   <a href="/settings" class="nav-item ${pageName==='Settings'?'active':''}">Settings</a>
   <div style="margin-top:auto;padding-top:20px;border-top:1px solid #2a2a3e">
@@ -1108,30 +1380,93 @@ app.get("/join",(req,res)=>{
 <div class="container">
   <h1>📹 Merimac Live</h1>
   <p class="subtitle">Join the show as a camera</p>
+  <div style="background:rgba(255,255,255,0.15);padding:20px;border-radius:12px;margin-bottom:2em;text-align:left">
+    <strong style="font-size:1.1em">Instructions:</strong>
+    <ol style="margin-left:20px;margin-top:10px;line-height:2">
+      <li>Press Join</li>
+      <li>Allow all camera permissions</li>
+    </ol>
+  </div>
   <button id="go">Join Now</button>
   <p id="msg">Tap the button above to get started</p>
+  <p style="margin-top:2em;opacity:0.9">Check out our website: <a href="https://merimac.ca" target="_blank" style="color:#fff;font-weight:600;text-decoration:underline">merimac.ca</a></p>
 </div>
 <script>
+// Generate a unique stream ID for this device
 function id(){let i=localStorage.getItem("sid");if(!i){i=Math.random().toString(36).slice(2,12);localStorage.setItem("sid",i);}return i;}
 const streamId=id();
+let heartbeatInterval=null;
+
 async function post(u,b){return fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)});}
-setInterval(()=>post("/api/heartbeat",{streamId},true),2000);
+
+// Clean up on page close
 window.addEventListener("pagehide",()=>post("/api/leave",{streamId},true));
+
 document.getElementById("go").onclick=async()=>{
   console.log("Join button clicked, stream ID:",streamId);
   const w=window.open("about:blank","_blank");
   const r=await post("/api/claim",{streamId});
   const j=await r.json();
   console.log("Claim response:",j);
-  if(!j.ok){w.close();return alert("All slots full");}
+  if(!j.ok){
+    w.close();
+    if(j.error==="Rate limit exceeded. Max 10 claims per minute."){
+      return alert("Rate limit exceeded. Please wait a moment and try again.");
+    }
+    return alert("All slots full");
+  }
   const n=j.slot;
   const vdoUrl="${VDO}/?push="+encodeURIComponent(streamId)
-             +"&label=cam"+n+"&bitrate=${SETTINGS.bitrate}&codec=h264&autostart&webcam&muted&relay";
+             +"&label=cam"+n+"&bitrate=${SETTINGS.bitrate}&codec=h264&autostart&webcam&muted&relay&closetab";
   console.log("Opening VDO.Ninja pusher:",vdoUrl);
   w.location=vdoUrl;
-  document.getElementById("msg").innerHTML='<div class="status">✅ Connected as Camera '+n+'</div><br>Keep this page open during the show';
+
+  // Start sending heartbeats only after successfully claiming a slot
+  if(heartbeatInterval)clearInterval(heartbeatInterval);
+  heartbeatInterval=setInterval(()=>post("/api/heartbeat",{streamId},true),2000);
+
+  document.getElementById("msg").innerHTML='<div class="status">✅ Connected as Camera '+n+'</div><br>Keep this page open while streaming.';
+
+  // Check if camera window is closed, then redirect to thanks page
+  const checkInterval=setInterval(()=>{
+    if(w.closed){
+      clearInterval(checkInterval);
+      clearInterval(heartbeatInterval);
+      window.location.href="/thanks";
+    }
+  },1000);
 };
 </script></body></html>`);
+});
+
+app.get("/thanks",(req,res)=>{
+  res.send(`<!doctype html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Thanks for Joining!</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);
+    color:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+  .container{text-align:center;max-width:500px;width:100%}
+  h1{font-size:2.5em;margin-bottom:0.5em;font-weight:700}
+  .message{font-size:1.2em;line-height:1.8;margin-bottom:2em;opacity:0.95}
+  .website-link{display:inline-block;background:#fff;color:#667eea;text-decoration:none;
+    padding:15px 40px;border-radius:50px;font-size:1.2em;font-weight:600;
+    box-shadow:0 10px 30px rgba(0,0,0,0.3);transition:all 0.3s ease;margin-top:1em}
+  .website-link:hover{transform:translateY(-2px);box-shadow:0 15px 40px rgba(0,0,0,0.4)}
+  .icon{font-size:4em;margin-bottom:0.5em;animation:bounce 2s infinite}
+  @keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
+</style>
+</head><body>
+<div class="container">
+  <div class="icon">🎉</div>
+  <h1>Thanks for Joining!</h1>
+  <p class="message">We appreciate you being part of Merimac Live.<br>Your stream has ended successfully.</p>
+  <a href="https://merimac.ca" class="website-link">Visit merimac.ca</a>
+  <p style="margin-top:2em;opacity:0.8;font-size:0.95em">Want to join again? Head back to the event!</p>
+</div>
+</body></html>`);
 });
 
 app.get("/slot/:n",(req,res)=>{
@@ -1146,7 +1481,7 @@ iframe{width:100%;height:100%;border:0}
   display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:999}
 #overlay div{background:#fff;color:#000;padding:20px 40px;border-radius:8px;font-family:system-ui;font-size:18px}
 #overlay:hover div{background:#f0f0f0}
-.waiting{color:#999;display:flex;align-items:center;justify-content:center;height:100%;font-family:system-ui}
+.waiting{color:#999;display:flex;align-items:center;justify-content:center;height:100%;font-family:system-ui;font-size:24px;font-weight:500}
 </style>
 </head><body>
 <div id="wrap" style="height:100%"><div class="waiting">Waiting for camera ${n}…</div></div>
@@ -1158,8 +1493,7 @@ function render(id){
   if(id===cur)return;cur=id;wrap.innerHTML="";
   if(!id){wrap.innerHTML='<div class="waiting">Waiting for camera ${n}…</div>';return;}
 
-  let url="${VDO}/?view="+encodeURIComponent(id)
-          +"&cleanoutput=1&stats=0&scene&autostart=1&coverview&relay";
+  let url=\`${VDO}/?view=\${encodeURIComponent(id)}&cleanoutput=1&stats=0&autostart=1&relay\`;
   if(!isOBS())url+="&muted=1";
 
   console.log("Loading VDO.Ninja viewer for stream:",id);
@@ -1267,12 +1601,11 @@ app.get("/group",(req,res)=>{
 <title>Group Feed - All Cameras</title>
 <style>
 html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui}
-#grid{display:grid;gap:2px;width:100%;height:100%;padding:2px;box-sizing:border-box}
-#grid.count-1{grid-template-columns:1fr;grid-template-rows:1fr}
-#grid.count-2,#grid.count-3,#grid.count-4{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
-#grid.count-5,#grid.count-6,#grid.count-7,#grid.count-8,#grid.count-9{grid-template-columns:1fr 1fr 1fr;grid-template-rows:1fr 1fr 1fr}
-#grid.count-10,#grid.count-11,#grid.count-12,#grid.count-13,#grid.count-14,#grid.count-15,#grid.count-16{grid-template-columns:1fr 1fr 1fr 1fr;grid-template-rows:1fr 1fr 1fr 1fr}
-.slot-container{position:relative;background:#111;overflow:hidden;min-height:150px}
+#toolbar{position:fixed;top:10px;right:10px;z-index:200;display:flex;gap:8px}
+#toolbar button{background:#667eea;color:#fff;border:none;padding:10px 20px;border-radius:6px;font-size:14px;font-weight:500;cursor:pointer;box-shadow:0 2px 8px rgba(102,126,234,0.3)}
+#toolbar button:hover{background:#764ba2;transform:scale(1.05);transition:all 0.2s}
+#grid{display:flex;flex-wrap:wrap;gap:4px;width:100vw;height:100vh;padding:4px;box-sizing:border-box;align-items:stretch;align-content:stretch}
+.slot-container{position:relative;background:#111;overflow:hidden;flex:1 1 auto;min-width:200px;min-height:200px;display:flex;align-items:center;justify-content:center}
 .slot-container iframe{width:100%;height:100%;border:0;display:block}
 .slot-label{position:absolute;top:5px;left:5px;background:rgba(0,0,0,0.7);color:#fff;padding:4px 10px;border-radius:4px;font-size:12px;z-index:100;font-weight:500}
 .waiting{color:#666;display:flex;align-items:center;justify-content:center;height:100%;font-size:14px}
@@ -1283,14 +1616,19 @@ html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:syste
 #overlay .count{color:#999;font-size:14px}
 #no-cameras{display:flex;align-items:center;justify-content:center;height:100%;color:#666;font-size:18px;flex-direction:column;gap:10px}
 #no-cameras .icon{font-size:48px;opacity:0.5}
+#toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#10b981;color:#fff;padding:12px 24px;border-radius:8px;font-size:14px;z-index:1000;display:none;box-shadow:0 4px 12px rgba(0,0,0,0.3)}
 </style>
 </head><body>
+<div id="toolbar">
+  <button onclick="copyCleanLink()">📋 Copy OBS Link</button>
+</div>
 <div id="grid"></div>
 <div id="no-cameras" style="display:none">
   <div class="icon">📹</div>
   <div>No active cameras</div>
   <div style="font-size:14px;color:#555">Cameras will appear here when they join</div>
 </div>
+<div id="toast"></div>
 <script src="/socket.io/socket.io.js"></script>
 <script>
 const grid=document.getElementById("grid");
@@ -1302,8 +1640,8 @@ let needsClick=true;
 function isOBS(){return /OBS|obslocal|obsbrowser/i.test(navigator.userAgent);}
 
 function slotsChanged(){
-  const curr=Object.entries(activeSlots).filter(([n,id])=>id).map(([n,id])=>n+':'+id).sort().join(',');
-  const prev=Object.entries(previousSlots).filter(([n,id])=>id).map(([n,id])=>n+':'+id).sort().join(',');
+  const curr=Object.entries(activeSlots).filter(([n,slot])=>slot).map(([n,slot])=>n+':'+(slot?.streamId||'')).sort().join(',');
+  const prev=Object.entries(previousSlots).filter(([n,slot])=>slot).map(([n,slot])=>n+':'+(slot?.streamId||'')).sort().join(',');
   return curr!==prev;
 }
 
@@ -1314,10 +1652,13 @@ function render(){
   }
 
   console.log("Rendering group feed - slots changed");
+  console.log("activeSlots:", JSON.stringify(activeSlots));
   previousSlots=JSON.parse(JSON.stringify(activeSlots));
 
   // Get all active slots
-  const active=Object.entries(activeSlots).filter(([n,id])=>id).sort((a,b)=>+a[0]-(+b[0]));
+  const active=Object.entries(activeSlots).filter(([n,slot])=>slot).sort((a,b)=>+a[0]-(+b[0]));
+  console.log("Active slots after filter:", active.length);
+  console.log("Active slots data:", JSON.stringify(active));
 
   if(active.length===0){
     grid.style.display='none';
@@ -1325,18 +1666,16 @@ function render(){
     return;
   }
 
-  grid.style.display='grid';
+  grid.style.display='flex';
   noCameras.style.display='none';
-
-  // Update grid class for auto-scaling
-  grid.className='';
-  grid.classList.add(\`count-\${Math.min(active.length,16)}\`);
 
   // Clear existing content
   grid.innerHTML='';
 
   // Create iframe for each active slot
-  active.forEach(([slotNum,streamId])=>{
+  active.forEach(([slotNum,slot])=>{
+    const streamId=slot?.streamId;
+    console.log(\`Slot \${slotNum}: streamId=\${streamId}\`);
     const container=document.createElement("div");
     container.className="slot-container";
     container.dataset.slot=slotNum;
@@ -1352,9 +1691,9 @@ function render(){
       waiting.textContent=\`Waiting for camera \${slotNum}...\`;
       container.appendChild(waiting);
     }else{
-      let url="${VDO}/?view="+encodeURIComponent(streamId)
-              +"&cleanoutput=1&stats=0&scene&autostart=1&coverview&relay";
+      let url=\`${VDO}/?view=\${encodeURIComponent(streamId)}&cleanoutput=1&stats=0&autostart=1&relay\`;
       if(!isOBS())url+="&muted=1";
+      console.log(\`Creating iframe for slot \${slotNum} with URL: \${url}\`);
 
       const iframe=document.createElement("iframe");
       iframe.allow="autoplay; camera; microphone; fullscreen; display-capture; encrypted-media; picture-in-picture";
@@ -1388,10 +1727,29 @@ function render(){
   }
 }
 
+function copyCleanLink(){
+  const cleanUrl=window.location.origin+"/group-clean";
+  navigator.clipboard.writeText(cleanUrl).then(()=>{
+    showToast("OBS link copied to clipboard!");
+  }).catch(err=>{
+    console.error("Failed to copy:",err);
+    showToast("Failed to copy OBS link");
+  });
+}
+
+function showToast(msg){
+  const toast=document.getElementById("toast");
+  toast.textContent=msg;
+  toast.style.display="block";
+  setTimeout(()=>{toast.style.display="none";},2000);
+}
+
 async function poll(){
   try{
     const j=await fetch("/api/state").then(r=>r.json());
+    console.log("Fetched state from API:", JSON.stringify(j));
     activeSlots=j.slots||{};
+    console.log("activeSlots set to:", JSON.stringify(activeSlots));
     render();
   }catch(e){console.error("Poll error:",e);}
 }
@@ -1403,6 +1761,134 @@ io_.on("state",()=>{
   poll();
 });
 setInterval(poll,3000);  // Poll every 3 seconds
+</script></body></html>`);
+});
+
+// Group feed - CLEAN VERSION (no labels)
+app.get("/group-clean",(req,res)=>{
+  res.send(`<!doctype html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Group Feed - Clean</title>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui}
+#grid{display:flex;flex-wrap:wrap;gap:4px;width:100vw;height:100vh;padding:4px;box-sizing:border-box;align-items:stretch;align-content:stretch}
+.slot-container{position:relative;background:#111;overflow:hidden;flex:1 1 auto;min-width:200px;min-height:200px;display:flex;align-items:center;justify-content:center}
+.slot-container iframe{width:100%;height:100%;border:0;display:block}
+.waiting{color:#666;display:flex;align-items:center;justify-content:center;height:100%;font-size:14px}
+#overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);
+  display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:999;flex-direction:column;gap:15px}
+#overlay .play-btn{background:#10b981;color:#fff;padding:20px 50px;border-radius:12px;font-size:20px;font-weight:600;box-shadow:0 4px 12px rgba(16,185,129,0.4)}
+#overlay .play-btn:hover{background:#059669;transform:scale(1.05);transition:all 0.2s}
+#overlay .count{color:#999;font-size:14px}
+#no-cameras{display:flex;align-items:center;justify-content:center;height:100%;color:#666;font-size:18px;flex-direction:column;gap:10px}
+#no-cameras .icon{font-size:48px;opacity:0.5}
+</style>
+</head><body>
+<div id="grid"></div>
+<div id="no-cameras" style="display:none">
+  <div class="icon">📹</div>
+  <div>No active cameras</div>
+  <div style="font-size:14px;color:#555">Cameras will appear here when they join</div>
+</div>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const grid=document.getElementById("grid");
+const noCameras=document.getElementById("no-cameras");
+let activeSlots={};
+let previousSlots={};
+let needsClick=true;
+
+function isOBS(){return /OBS|obslocal|obsbrowser/i.test(navigator.userAgent);}
+
+function slotsChanged(){
+  const curr=Object.entries(activeSlots).filter(([n,slot])=>slot).map(([n,slot])=>n+':'+(slot?.streamId||'')).sort().join(',');
+  const prev=Object.entries(previousSlots).filter(([n,slot])=>slot).map(([n,slot])=>n+':'+(slot?.streamId||'')).sort().join(',');
+  return curr!==prev;
+}
+
+function render(){
+  if(!slotsChanged() && grid.children.length>0){
+    return;
+  }
+
+  previousSlots=JSON.parse(JSON.stringify(activeSlots));
+
+  const active=Object.entries(activeSlots).filter(([n,slot])=>slot).sort((a,b)=>+a[0]-(+b[0]));
+
+  if(active.length===0){
+    grid.style.display='none';
+    noCameras.style.display='flex';
+    return;
+  }
+
+  grid.style.display='grid';
+  noCameras.style.display='none';
+
+  grid.className='';
+  grid.classList.add(\`count-\${Math.min(active.length,16)}\`);
+
+  grid.innerHTML='';
+
+  // NO LABELS in clean version
+  active.forEach(([slotNum,slot])=>{
+    const streamId=slot?.streamId;
+    const container=document.createElement("div");
+    container.className="slot-container";
+    container.dataset.slot=slotNum;
+
+    if(!streamId){
+      const waiting=document.createElement("div");
+      waiting.className="waiting";
+      waiting.textContent=\`Waiting for camera \${slotNum}...\`;
+      container.appendChild(waiting);
+    }else{
+      let url=\`${VDO}/?view=\${encodeURIComponent(streamId)}&cleanoutput=1&stats=0&autostart=1&relay\`;
+      if(!isOBS())url+="&muted=1";
+
+      const iframe=document.createElement("iframe");
+      iframe.allow="autoplay; camera; microphone; fullscreen; display-capture; encrypted-media; picture-in-picture";
+      iframe.setAttribute("allowfullscreen","");
+      iframe.src=url;
+      container.appendChild(iframe);
+    }
+
+    grid.appendChild(container);
+  });
+
+  if(!isOBS() && needsClick && active.length>0){
+    const overlay=document.createElement("div");
+    overlay.id="overlay";
+    overlay.innerHTML=\`
+      <div class="play-btn">▶ Click to Play All Cameras</div>
+      <div class="count">\${active.length} camera\${active.length===1?'':'s'} active</div>
+    \`;
+    overlay.onclick=()=>{
+      needsClick=false;
+      overlay.remove();
+      document.querySelectorAll('.slot-container iframe').forEach(f=>{
+        const oldSrc=f.src;
+        f.src='';
+        setTimeout(()=>f.src=oldSrc,100);
+      });
+    };
+    document.body.appendChild(overlay);
+  }
+}
+
+async function poll(){
+  try{
+    const j=await fetch("/api/state").then(r=>r.json());
+    activeSlots=j.slots||{};
+    render();
+  }catch(e){console.error("Poll error:",e);}
+}
+
+poll();
+const io_=io();
+io_.on("state",()=>{
+  poll();
+});
+setInterval(poll,3000);
 </script></body></html>`);
 });
 
@@ -1421,7 +1907,7 @@ app.get("/control",requireAuth,async(req,res)=>{
     <td>${status}</td>
     <td class="stream-id">${id}</td>
     <td class="duration">${duration}</td>
-    <td><a href="/slot/${i}" target="_blank" class="btn-link">View</a> <button onclick="copySlotUrl('${slotUrl}')" class="btn-copy">Copy Link</button></td>
+    <td><a href="/slot/${i}" target="_blank" class="btn-link">View</a> <button onclick="copySlotUrl('${slotUrl}')" class="btn-copy">Copy OBS Link</button></td>
     <td><button onclick="clearSlot(${i})" class="btn-clear" ${!s?'disabled':''}>Clear</button></td></tr>`);
   }
   const rowsHtml=rows.join("");
@@ -1569,7 +2055,7 @@ app.get("/control",requireAuth,async(req,res)=>{
           <td>\${status}</td>
           <td class="stream-id">\${id}</td>
           <td class="duration">\${duration}</td>
-          <td><a href="/slot/\${i}" target="_blank" class="btn-link">View</a> <button onclick="copySlotUrl('\${slotUrl}')" class="btn-copy">Copy Link</button></td>
+          <td><a href="/slot/\${i}" target="_blank" class="btn-link">View</a> <button onclick="copySlotUrl('\${slotUrl}')" class="btn-copy">Copy OBS Link</button></td>
           <td><button onclick="clearSlot(\${i})" class="btn-clear" \${disabled}>Clear</button></td></tr>\`;
         }
         document.getElementById('t').innerHTML=h;
@@ -1623,7 +2109,7 @@ app.get("/control",requireAuth,async(req,res)=>{
     setInterval(refresh,2000);  // Also poll every 2 seconds as backup
     </script>
   `;
-  res.send(dashboardLayout('Control',content));
+  res.send(dashboardLayout('Audience Cam Control',content));
 });
 
 // Network page
@@ -1851,7 +2337,7 @@ app.get("/guide",requireAuth,async(req,res)=>{
         <ol>
           <li>In OBS, add a new <strong>Browser Source</strong></li>
           <li>Go to the Control page and find the slot you want to use</li>
-          <li>Click the <strong>"Copy Link"</strong> button next to the slot</li>
+          <li>Click the <strong>"Copy OBS Link"</strong> button next to the slot</li>
           <li>Paste the URL into the OBS Browser Source settings</li>
           <li>Set width to <code>1920</code> and height to <code>1080</code> (or your desired resolution)</li>
           <li>Click OK - the camera feed will appear automatically when someone connects to that slot!</li>
@@ -2081,6 +2567,75 @@ app.get("/activity",requireAuth,async(req,res)=>{
     </script>
   `;
   res.send(dashboardLayout('Activity',content));
+});
+
+// Web Terminal page
+app.get("/terminal", requireAuth, async (req, res) => {
+  const content = `
+    <div class="header">
+      <div class="header-title">
+        <h1>Web Terminal</h1>
+        <p class="subtitle">SSH to localhost - Login as ef</p>
+      </div>
+    </div>
+    <div class="card" style="padding:0;background:#000">
+      <div id="terminal" style="padding:10px;height:600px"></div>
+    </div>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+      const term = new Terminal({
+        cursorBlink: true,
+        fontSize: 14,
+        fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+        theme: {
+          background: '#000000',
+          foreground: '#00ff00',
+          cursor: '#00ff00',
+          selection: '#333333'
+        }
+      });
+      const fitAddon = new FitAddon.FitAddon();
+      term.loadAddon(fitAddon);
+      term.open(document.getElementById('terminal'));
+      fitAddon.fit();
+
+      const socket = io();
+
+      // Handle terminal output from server
+      socket.on('terminal-output', (data) => {
+        term.write(data);
+      });
+
+      // Send user input to server
+      term.onData((data) => {
+        socket.emit('terminal-input', data);
+      });
+
+      // Initial connection
+      socket.on('connect', () => {
+        socket.emit('terminal-start');
+      });
+
+      socket.on('disconnect', () => {
+        term.writeln('\\r\\n\\x1b[1;31m✗ Disconnected from server\\x1b[0m');
+      });
+
+      // Handle window resize
+      window.addEventListener('resize', () => {
+        fitAddon.fit();
+        socket.emit('terminal-resize', { cols: term.cols, rows: term.rows });
+      });
+
+      // Send initial size
+      setTimeout(() => {
+        socket.emit('terminal-resize', { cols: term.cols, rows: term.rows });
+      }, 100);
+    </script>
+  `;
+  res.send(dashboardLayout('Terminal', content));
 });
 
 // Camera Control page
@@ -2629,16 +3184,160 @@ app.get("/camera-control",requireAuth,async(req,res)=>{
     loadCameras();
     </script>
   `;
-  res.send(dashboardLayout('Camera Control',content));
+  res.send(dashboardLayout('OBS CAM Control',content));
 });
 
-setInterval(()=>{
-  const t=now();let ch=false;
-  for(let i=1;i<=50;i++){
-    const s=SLOTS[i];if(!s)continue;
-    if(t-s.last>INACTIVITY_MS && t>s.grace){deviceIndex.delete(s.streamId);SLOTS[i]=null;ch=true;}
-  }
-  if(ch)io.emit("state",{slots:SLOTS});
-},3000);
+// Socket.IO - Web Terminal handlers
+const {spawn} = require('child_process');
+const terminalSessions = new Map(); // socket.id -> shell process
 
-server.listen(PORT,()=>console.log("Bridge listening :"+PORT));
+io.on('connection', (socket) => {
+  console.log(`Socket connected: ${socket.id}`);
+
+  socket.on('terminal-start', () => {
+    // Only allow authenticated users
+    const session = socket.request.session;
+    if (!session || !session.authenticated) {
+      socket.emit('terminal-output', '\r\n\x1b[1;31mError: Not authenticated\x1b[0m\r\n');
+      socket.disconnect();
+      return;
+    }
+
+    // SSH to localhost as user 'ef' using sshpass for authentication
+    const shell = spawn('sshpass', ['-p', 'ef99#', 'ssh', '-tt', '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null', 'ef@localhost'], {
+      env: process.env
+    });
+
+    terminalSessions.set(socket.id, shell);
+
+    // Send shell output to client
+    shell.stdout.on('data', (data) => {
+      socket.emit('terminal-output', data.toString());
+    });
+
+    shell.stderr.on('data', (data) => {
+      socket.emit('terminal-output', data.toString());
+    });
+
+    shell.on('exit', (code) => {
+      socket.emit('terminal-output', `\r\n\x1b[1;33mShell exited with code ${code}\x1b[0m\r\n`);
+      terminalSessions.delete(socket.id);
+    });
+
+    console.log(`Terminal session started for ${session.username} (logged in as ef)`);
+    logActivity('system', `Terminal session started by ${session.username} (user: ef)`);
+  });
+
+  socket.on('terminal-input', (data) => {
+    const shell = terminalSessions.get(socket.id);
+    if (shell && shell.stdin.writable) {
+      shell.stdin.write(data);
+    }
+  });
+
+  socket.on('terminal-resize', (size) => {
+    const shell = terminalSessions.get(socket.id);
+    if (shell && shell.resize) {
+      try {
+        shell.resize(size.cols, size.rows);
+      } catch (e) {
+        // Resize not supported in simple spawn
+      }
+    }
+  });
+
+  socket.on('disconnect', () => {
+    const shell = terminalSessions.get(socket.id);
+    if (shell) {
+      shell.kill();
+      terminalSessions.delete(socket.id);
+      console.log(`Terminal session ended: ${socket.id}`);
+    }
+  });
+});
+
+// Optimized slot cleanup - only checks active slots
+const cleanupInterval = setInterval(() => {
+  const t = now();
+  let changed = false;
+
+  // Only iterate through active slots instead of all 50
+  for (const slotNum of activeSlots) {
+    const s = SLOTS[slotNum];
+    if (!s) {
+      activeSlots.delete(slotNum);
+      continue;
+    }
+
+    if (t - s.last > INACTIVITY_MS && t > s.grace) {
+      deviceIndex.delete(s.streamId);
+      SLOTS[slotNum] = null;
+      activeSlots.delete(slotNum);
+      changed = true;
+      logActivity('leave', `Camera slot ${slotNum} timed out`, slotNum);
+    }
+  }
+
+  if (changed) {
+    io.emit("state", {slots: SLOTS});
+  }
+}, 3000);
+
+// Graceful shutdown
+async function gracefulShutdown(signal) {
+  console.log(`\n${signal} received. Starting graceful shutdown...`);
+
+  // Stop accepting new connections
+  clearInterval(cleanupInterval);
+
+  // Save all data
+  console.log('Saving activity log...');
+  await saveActivityLog();
+
+  console.log('Saving cameras...');
+  await saveCameras();
+
+  console.log('Saving settings...');
+  await saveSettings();
+
+  // Close server
+  server.close(() => {
+    console.log('Server closed. Exiting.');
+    process.exit(0);
+  });
+
+  // Force exit after 10 seconds
+  setTimeout(() => {
+    console.error('Forced shutdown after timeout');
+    process.exit(1);
+  }, 10000);
+}
+
+// Handle shutdown signals
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Handle uncaught errors
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err);
+  gracefulShutdown('uncaughtException');
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled rejection at:', promise, 'reason:', reason);
+});
+
+// Start server with error handling
+server.listen(PORT, () => {
+  console.log(`✓ Bridge listening on port ${PORT}`);
+  console.log(`✓ Public host: ${PUBLIC_HOST}`);
+  console.log(`✓ Active slots tracking: enabled`);
+  console.log(`✓ Graceful shutdown: enabled`);
+}).on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`✗ Port ${PORT} is already in use`);
+  } else {
+    console.error('✗ Server error:', err);
+  }
+  process.exit(1);
+});
