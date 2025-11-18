@@ -537,17 +537,28 @@ function start_dvd_bounce()
       -- already in DVD mode, do nothing
       return
    end
-   -- stop if currently active in different mode
-   if active then
-      stop()
+
+   -- if switching from throw mode, just change mode without stopping
+   if active and bounce_type == 'throw_bounce' then
+      bounce_type = 'dvd_bounce'
+      -- reset DVD-specific state
+      moving_down = math.random() < 0.5
+      moving_right = math.random() < 0.5
+      special_bounce = false
+      velocity_x = 0
+      velocity_y = 0
+      -- setup color filter for DVD mode
+      if dvd_bounces_change_color and not color_filter then
+         get_color_filter()
+      end
+      return
    end
-   -- switch to DVD mode
+
+   -- not active, so start fresh
    bounce_type = 'dvd_bounce'
-   -- find scene item if needed
    if not scene_item then
       find_scene_item()
    end
-   -- start bouncing
    if scene_item then
       if dvd_bounces_change_color then
          get_color_filter()
@@ -562,19 +573,24 @@ function start_throw_bounce()
       -- already in throw mode, do nothing
       return
    end
-   -- stop if currently active in different mode
-   if active then
-      stop()
+
+   -- if switching from DVD mode, just change mode without stopping
+   if active and bounce_type == 'dvd_bounce' then
+      bounce_type = 'throw_bounce'
+      -- reset throw-specific state
+      velocity_x = math.random(-throw_speed_x, throw_speed_x)
+      velocity_y = -math.random(throw_speed_y)
+      wait_frames = 0
+      -- release color filter (not used in throw mode)
+      release_color_filter_reference()
+      return
    end
-   -- switch to throw mode
+
+   -- not active, so start fresh
    bounce_type = 'throw_bounce'
-   -- release color filter if it was being used
-   release_color_filter_reference()
-   -- find scene item if needed
    if not scene_item then
       find_scene_item()
    end
-   -- start bouncing
    if scene_item then
       start()
    end
