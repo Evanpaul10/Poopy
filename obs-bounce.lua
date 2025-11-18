@@ -21,6 +21,10 @@ local source_name = ''
 local start_on_scene_change = true
 --- the hotkey assigned to toggle_bounce in OBS's hotkey config
 local hotkey_id = obs.OBS_INVALID_HOTKEY_ID
+--- hotkey for starting DVD bounce mode
+local hotkey_dvd_id = obs.OBS_INVALID_HOTKEY_ID
+--- hotkey for starting throw bounce mode
+local hotkey_throw_id = obs.OBS_INVALID_HOTKEY_ID
 --- true when the scene item is being moved
 local active = false
 --- scene item to be moved
@@ -200,6 +204,17 @@ function script_load(settings)
    local hotkey_save_array = obs.obs_data_get_array(settings, 'toggle_hotkey')
    obs.obs_hotkey_load(hotkey_id, hotkey_save_array)
    obs.obs_data_array_release(hotkey_save_array)
+
+   hotkey_dvd_id = obs.obs_hotkey_register_frontend('start_dvd_bounce', 'Start DVD Bounce', start_dvd_bounce)
+   local hotkey_dvd_save_array = obs.obs_data_get_array(settings, 'dvd_hotkey')
+   obs.obs_hotkey_load(hotkey_dvd_id, hotkey_dvd_save_array)
+   obs.obs_data_array_release(hotkey_dvd_save_array)
+
+   hotkey_throw_id = obs.obs_hotkey_register_frontend('start_throw_bounce', 'Start Throw Bounce', start_throw_bounce)
+   local hotkey_throw_save_array = obs.obs_data_get_array(settings, 'throw_hotkey')
+   obs.obs_hotkey_load(hotkey_throw_id, hotkey_throw_save_array)
+   obs.obs_data_array_release(hotkey_throw_save_array)
+
    obs.obs_frontend_add_event_callback(on_event)
 end
 
@@ -222,6 +237,14 @@ function script_save(settings)
    local hotkey_save_array = obs.obs_hotkey_save(hotkey_id)
    obs.obs_data_set_array(settings, 'toggle_hotkey', hotkey_save_array)
    obs.obs_data_array_release(hotkey_save_array)
+
+   local hotkey_dvd_save_array = obs.obs_hotkey_save(hotkey_dvd_id)
+   obs.obs_data_set_array(settings, 'dvd_hotkey', hotkey_dvd_save_array)
+   obs.obs_data_array_release(hotkey_dvd_save_array)
+
+   local hotkey_throw_save_array = obs.obs_hotkey_save(hotkey_throw_id)
+   obs.obs_data_set_array(settings, 'throw_hotkey', hotkey_throw_save_array)
+   obs.obs_data_array_release(hotkey_throw_save_array)
 end
 
 function script_tick(seconds)
@@ -505,6 +528,55 @@ function toggle()
       if scene_item then
          start()
       end
+   end
+end
+
+--- start DVD bounce mode
+function start_dvd_bounce()
+   if active and bounce_type == 'dvd_bounce' then
+      -- already in DVD mode, do nothing
+      return
+   end
+   -- stop if currently active in different mode
+   if active then
+      stop()
+   end
+   -- switch to DVD mode
+   bounce_type = 'dvd_bounce'
+   -- find scene item if needed
+   if not scene_item then
+      find_scene_item()
+   end
+   -- start bouncing
+   if scene_item then
+      if dvd_bounces_change_color then
+         get_color_filter()
+      end
+      start()
+   end
+end
+
+--- start throw bounce mode
+function start_throw_bounce()
+   if active and bounce_type == 'throw_bounce' then
+      -- already in throw mode, do nothing
+      return
+   end
+   -- stop if currently active in different mode
+   if active then
+      stop()
+   end
+   -- switch to throw mode
+   bounce_type = 'throw_bounce'
+   -- release color filter if it was being used
+   release_color_filter_reference()
+   -- find scene item if needed
+   if not scene_item then
+      find_scene_item()
+   end
+   -- start bouncing
+   if scene_item then
+      start()
    end
 end
 
