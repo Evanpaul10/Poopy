@@ -91,28 +91,47 @@ local air_drag = 0.99
 local ground_friction = 0.95
 local elasticity = 0.8
 
---- find the named scene item in the current scene
+--- find the named scene item in any scene
 --- store its original position and color_add, to be restored when we stop bouncing it
 local function find_scene_item()
-   local source = obs.obs_frontend_get_current_scene()
-   if not source then
-      return
+   -- First try current scene
+   local current_scene_source = obs.obs_frontend_get_current_scene()
+   if current_scene_source then
+      local current_scene = obs.obs_scene_from_source(current_scene_source)
+      scene_item = obs.obs_scene_find_source(current_scene, source_name)
+
+      if scene_item then
+         scene_width = obs.obs_source_get_width(current_scene_source)
+         scene_height = obs.obs_source_get_height(current_scene_source)
+         obs.obs_source_release(current_scene_source)
+         original_pos = get_scene_item_pos(scene_item)
+         if bounce_type == 'dvd_bounce' and dvd_bounces_change_color then
+            get_color_filter()
+         end
+         return
+      end
+      obs.obs_source_release(current_scene_source)
    end
 
-   scene_width = obs.obs_source_get_width(source)
-   scene_height = obs.obs_source_get_height(source)
-   local scene = obs.obs_scene_from_source(source)
-   obs.obs_source_release(source)
+   -- If not found in current scene, search all scenes
+   local scenes = obs.obs_frontend_get_scenes()
+   if scenes then
+      for _, scene_source in ipairs(scenes) do
+         local scene = obs.obs_scene_from_source(scene_source)
+         scene_item = obs.obs_scene_find_source(scene, source_name)
 
-   scene_item = obs.obs_scene_find_source(scene, source_name)
-   if not scene_item then
-      return
+         if scene_item then
+            scene_width = obs.obs_source_get_width(scene_source)
+            scene_height = obs.obs_source_get_height(scene_source)
+            original_pos = get_scene_item_pos(scene_item)
+            if bounce_type == 'dvd_bounce' and dvd_bounces_change_color then
+               get_color_filter()
+            end
+            break
+         end
+      end
    end
-
-   original_pos = get_scene_item_pos(scene_item)
-   if bounce_type == 'dvd_bounce' and dvd_bounces_change_color then
-      get_color_filter()
-   end
+   obs.source_list_release(scenes)
 end
 
 function script_description()
